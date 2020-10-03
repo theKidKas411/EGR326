@@ -1,0 +1,136 @@
+/**************************************************************
+  Title:         Compare Capture with the MSP432
+  Filename:      Lab3-Part 2
+  Author:        Kasonde Musonda
+  Description:   This program detects the distance of
+                 an object from an ultrasonic sensor. Prints
+                 the distance on a computer monitor and flashes
+                 an LED light to denote distance to the object.
+ **************************************************************/
+#include "msp.h"
+#include <stdio.h>
+
+#define PORT P2     //Port 2 of MSP432 Launchpad*/
+#define TRIG BIT5   //P2.5 - Trigger Pin of Ultrasonic Sensor
+#define ECHO BIT4   //P2.4 - Echo Pin of the UltraSonic sensor*/
+
+volatile float t_rise=0;     //Global Variables
+volatile float pwm=0;
+
+float distanceCM =0.0;       //Distance read in IN and Meters
+float distanceIN = 0.0;
+
+
+/*Function Prototypes*/
+
+void init(void);
+void timerA_init(void);
+void TA0_N_IRQHandler(void);
+void delay_Milli(int milli);
+void delay_Micro(int micro);
+
+/* System Initialization
+ * @Param:void
+ * @Return:void
+ */
+void init(){
+
+    PORT->SEL0 &= ~(TRIG);   //Sets P2.4 pin as GPIO-Trigger Pin.
+    PORT->SEL1 &= ~(TRIG);
+    PORT->DIR |= (TRIG);
+    PORT->OUT |= (TRIG);
+    //PORT->OUT &= ~(TRIG);
+
+    PORT->SEL0 |= (ECHO);     //TA0.CC12A TA0.2 on P2.5.
+    PORT->SEL1 &= ~(ECHO);
+    PORT->OUT &= ~(ECHO);
+}
+
+/*Timer A- Setup Function
+ *Sets up Timer A in Compare/Capture mode with with
+ *With clock source as SMCLK in UpMode
+ *@Param: Void
+ *@return: void
+ */
+void timerA_init(){
+
+    __disable_irq();
+
+    TIMER_A0->CTL |=TIMER_A_CTL_TASSEL_2 | // Use SMCLK as clock source,
+                    TIMER_A_CTL_MC_2   | // Start timer in UP mode
+                    TIMER_A_CTL_CLR;       // clear TA0R
+
+    TIMER_A0->CCTL[1] =TIMER_A_CCTLN_CM_3    | // Capture rising and falling edge,
+                       TIMER_A_CCTLN_CCIS_0  | // Use CCI2A
+                       TIMER_A_CCTLN_CCIE    | // Enable capture interrupt
+                       TIMER_A_CCTLN_CAP     | // Enable capture mode,
+                       TIMER_A_CCTLN_SCS;      // Synchronous capture
+
+    SysTick -> CTRL = 0;    //Disable systick during step
+    SysTick -> LOAD = 0x00FFFFFF;   //max reload value
+    SysTick -> VAL = 0; //clears it
+    SysTick -> CTRL = 0x00000005;   //enables systick 3MHz no interrupts
+
+    NVIC_SetPriority(TA0_N_IRQn,1);
+    NVIC_EnableIRQ(TA0_N_IRQn);
+
+    __enable_irq();     //Enable global interrupt.
+}
+
+/*
+ * Delay in milliseconds using SysTick Timer.
+ */
+void delay_Milli(int milli){
+    SysTick->LOAD =(3333*milli)-1;
+    SysTick->VAL = 0;
+    while((SysTick->CTRL & 0x10000)==0);
+}
+
+/*
+ * Delay in milliseconds using SysTick Timer
+ */
+void delay_Micro(int micro){
+    SysTick->LOAD = (3*micro)-1;
+    SysTick->VAL = 0;
+    while((SysTick->CTRL & 0x10000)==0){}
+}
+
+/*
+ * Timer A - Interrupt Handler.
+ */
+void TA0_N_IRQHandler(void){
+
+    t_rise=TIMER_A0->CCR[1];   //Get current time
+    if(PORT->IN & ECHO){
+        TIMER_A0->CTL|=TIMER_A_CTL_CLR;    //Records the time of capture.
+    }else{
+        pwm=t_rise;
+    }
+    TIMER_A0->CCTL[1] &= ~(TIMER_A_CCTLN_CCIFG); //Clears the interrupt flag.
+}
+
+/*
+ * Main Function.
+ */
+void main(void)
+{
+    WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD;     // stop watchdog timer
+
+    /*Method Invocation*/
+    init();
+    timerA_init();
+
+    while(1){
+
+        PORT->OUT &= ~TRIG;     //Sends the trigger pulse to UltraSonic Sensor.
+        delay_Micro(10);
+        PORT->OUT |= TRIG;
+
+        delay_Milli(2000);
+
+        distanceCM = (pwm/3.0) / 58.0;      // Distance calculation at 340m/s
+        distanceIN = (pwm/3.0) / 148.0;     //Distance calculation in inches.
+        printf("\nInches:%.2g\tCentimeters:%.2g", distanceCM,distanceIN);
+
+    }
+}
