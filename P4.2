@@ -1,0 +1,120 @@
+/****************************************************************
+ * Lab One:     Interfacing a keypad and rotary encoder with the
+ *              MSP432
+ * Author:      Kasonde Musonda
+ * Date:        10/02/2020
+ * Professor:   Dr. Brian Krug
+ * Description: Detecting knob direction with the rotary encoder
+ ****************************************************************/
+#include "msp.h"
+#include <stdio.h>
+#include <math.h>
+
+volatile uint8_t CW=0;          //Counter for the clockwise direction.
+volatile int CCW=0;             //Counter for the anti-clockwise direction.
+volatile int tDirect = 0;       //Flag for the pushbutton.
+
+/*Function Prototypes*/
+void setPins(void);
+void setInterrupts(void);
+void PORT2_IRQHandler(void);
+void PORT3_IRQHandler(void);
+
+/*
+ * Sets pins for the Rotary Encoder
+ * P2.7- CLK pin while P2.6 is the DT pin
+ * @Param: void
+ * @return: void
+ */
+void setPins(){
+
+    P2->SEL0 &= ~(BIT7|BIT6);     //GPIO set up.
+    P2->SEL1 &= ~(BIT7|BIT6);
+    P2->DIR &=  ~(BIT7|BIT6);     //BIT6 - DT PIN
+    P2->REN |=   (BIT7|BIT6);     //BIT7 - CLK PIN
+    P2->OUT |=   (BIT7|BIT6);
+
+    P3->SEL0 &= ~(BIT0);     //GPIO set up.
+    P3->SEL1 &= ~(BIT0);     //BIT0 - SW(Pushdown)
+    P3->DIR &=  ~(BIT0);
+    P3->REN |=   (BIT0);
+    P3->OUT |=   (BIT0);
+
+}
+
+/*interrupt set up function for
+ * the Pushbutton and ClK pins
+ * @Param:void
+ * @return:void
+ */
+void setInterrupts(){
+
+    P2->IES &=  ~(BIT7);    //Interrupt setup for the clock pin
+    P2->IE  |=   (BIT7);
+    P2->IFG  =      0;
+
+    P3->IES |=  (BIT0);   //Interrupt set up for the pushbutton - SW
+    P3->IE  |=  (BIT0);
+    P3->IFG  =    0;
+
+    /*Interrupt Enable*/
+    NVIC_EnableIRQ(PORT2_IRQn);
+    NVIC_EnableIRQ(PORT3_IRQn);
+
+    NVIC_SetPriority(PORT2_IRQn, 2);
+    NVIC_SetPriority(PORT3_IRQn, 1);
+
+    P2->IFG =0;
+    P3->IFG =0;
+}
+
+/*
+ * Interrupt Handler for PORT3 - Pushbutton
+ * @param:void
+ * @return:void
+ */
+void PORT3_IRQHandler(){
+
+      if(P3->IFG & BIT0){             //Button pushed
+              tDirect=abs(CCW-CW);
+          }
+
+      if(tDirect > 0){
+              printf("Clockwise Turns:%d\n",tDirect);     //Prints direction of knob turns.
+        }else if(tDirect==0){
+              printf("\nNet Turns:%d\n",tDirect);
+        }else{
+              printf("\nAnti-Clockwise Turns:%d\n",tDirect);
+      }
+ P3->IFG = 0; //Clears interrupt.
+}
+
+/*
+ * Interrupt Handler for PORT2
+ * @param:void
+ * @return:void
+ */
+void PORT2_IRQHandler(void){
+
+     if(P2->IFG & BIT7){          //checks status of DT and ClK pins on rising edge of the clock.
+        if(!(P2->IN & BIT7)&&(P2->IN & BIT6) ){
+             CW = CW+1;
+        }
+     }else if((P2->IN & BIT7)&& (P2->IN & BIT6)){ //Falling edge of the clock
+            CCW = CCW+1;
+        }
+     P2->IFG &= 0;//clears flag
+}
+
+/**
+ * main.c
+ */
+void main(void){
+
+	WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD;		// stop watchdog timer
+
+	setPins();      /*Method Invocation*/
+	setInterrupts();
+
+	while(1){}
+}
