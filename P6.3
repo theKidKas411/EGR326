@@ -1,0 +1,177 @@
+/***********************************************************************************************************
+ Title:        EGR 326 Lab 5
+ Filename:     Part_I.c, ST7735.h, ST7735.c
+ Author(s):    Kasonde Musonda
+ Date:         10/09/2020
+ Instructor:   Professor: Dr.Krug
+ Description:  Part I of Lab 6
+ Note:         PartIII - Updating characters at different places on the LCD.
+************************************************************************************************************
+WIRING FOR MSP432
+Full Color LCD: SCK - P9.5 | SDA - P9.7 | LED - 3.3V | A0 - P9.2 | RST - P9.3 |
+                VCC - 3.3V | GND - GND  | CS  - P9.4
+***********************************************************************************************************/
+#include "msp.h"
+#include <stdio.h>
+#include <ST7735.h>
+
+enum numStates {zero,one,two,three,four,five,six,seven,eight,nine,wait}; //States statemachine.
+enum numStates state =zero;
+
+/*Function Prototype*/
+void Clock_Init48MHz(void);
+void sysTick_Timer(void);
+void SysTick_Handler(void);
+void stateCanvas(void);
+
+/*Configures the Flash Wait-State,HFXT to use 48MHz - Provided.
+ *Crystal source to MCLK and HSMCLK
+ *@Param: void
+ *@Return: void
+ */
+void Clock_Init48MHz(void){
+
+    //Configure Flash wait-state to 1 for both banks 0 & 1
+       FLCTL->BANK0_RDCTL = (FLCTL->BANK0_RDCTL & ~(FLCTL_BANK0_RDCTL_WAIT_MASK)) |
+       FLCTL_BANK0_RDCTL_WAIT_1;
+       FLCTL->BANK1_RDCTL = (FLCTL->BANK0_RDCTL & ~(FLCTL_BANK0_RDCTL_WAIT_MASK)) |
+       FLCTL_BANK1_RDCTL_WAIT_1;
+
+    //Configure HFXT to use 48MHz crystal, source to MCLK & HSMCLK*
+       PJ->SEL0 |= BIT2 | BIT3;                     // Configure PJ.2/3 for HFXT function
+       PJ->SEL1 &= ~(BIT2 | BIT3);
+       CS->KEY = CS_KEY_VAL ;                       // Unlock CS module for register access
+       CS->CTL2 |= CS_CTL2_HFXT_EN | CS_CTL2_HFXTFREQ_6 | CS_CTL2_HFXTDRIVE;
+      while(CS->IFG & CS_IFG_HFXTIFG)
+                    CS->CLRIFG |= CS_CLRIFG_CLR_HFXTIFG;
+
+    /* Select MCLK & HSMCLK = HFXT, no divider */
+      CS->CTL1 = CS->CTL1 & ~(CS_CTL1_SELM_MASK     |
+                              CS_CTL1_DIVM_MASK     |
+                              CS_CTL1_SELS_MASK     |
+                              CS_CTL1_DIVHS_MASK)   |
+                              CS_CTL1_SELM__HFXTCLK |
+                              CS_CTL1_SELS__HFXTCLK;
+
+      CS->CTL1 = CS->CTL1 |CS_CTL1_DIVS_2;    // change the SMCLK clock speed to 12 MHz.
+
+      CS->KEY = 0;                            // Lock CS module from unintended accesses
+}
+
+/*Systick_Timer Configuration with interrupts.
+ *@Param:void
+ *@Return:void
+ */
+void sysTick_Timer(){
+    SysTick->CTRL = 0;
+    SysTick->LOAD = 48000000-1;
+    SysTick->VAL = 0;
+    SysTick->CTRL = 7;
+}
+
+/*Systick-Timer Interrupt service handler
+ *@Param: void.
+ *@Return: void
+ */
+void SysTick_Handler(){
+
+    if(state==zero){
+        state=one;
+    }else if(state==one){
+        state=two;
+    }else if(state==two){
+        state=three;
+    }else if(state==three){
+        state= four;
+    }else if(state==four){
+        state=five;
+    }else if(state==five){
+        state=six;
+    }else if(state==six){
+        state=seven;
+    }else if(state==seven){
+        state=eight;
+    }else if(state==eight){
+        state=nine;
+    }else if(state==nine){
+       state=wait;
+    }else if(state==wait){
+        state=zero;
+    }
+}
+
+/*State Machine Canvassing
+ *@Param:Void
+ *@Return:Void
+ */
+void stateCanvas(void){
+    switch(state){
+            case zero:
+                Output_Clear();
+                ST7735_DrawChar(1,1,'0',ST7735_WHITE,ST7735_BLACK,4);
+                __delay_cycles(3000000);
+                break;
+            case one:
+                Output_Clear();
+                ST7735_DrawChar(100,125,'1',ST7735_WHITE,ST7735_BLACK,4);
+                __delay_cycles(3000000);
+                break;
+            case two:
+                Output_Clear();
+                ST7735_DrawChar(100,1,'2',ST7735_WHITE,ST7735_BLACK,4);
+                __delay_cycles(3000000);
+                break;
+            case three:
+                Output_Clear();
+                ST7735_DrawChar(1,125,'3',ST7735_WHITE,ST7735_BLACK,4);
+                __delay_cycles(3000000);
+                break;
+            case four:
+                Output_Clear();
+                ST7735_DrawChar(1,1,'4',ST7735_WHITE,ST7735_BLACK,4);
+                __delay_cycles(3000000);
+                break;
+            case five:
+                Output_Clear();
+                ST7735_DrawChar(100,125,'5',ST7735_WHITE,ST7735_BLACK,4);
+                __delay_cycles(3000000);
+                break;
+            case six:
+                Output_Clear();
+                ST7735_DrawChar(100,1,'6',ST7735_WHITE,ST7735_BLACK,4);
+                __delay_cycles(3000000);
+                break;
+            case seven:
+                Output_Clear();
+                ST7735_DrawChar(1,125,'7',ST7735_WHITE,ST7735_BLACK,4);
+                __delay_cycles(3000000);
+                break;
+            case eight:
+                Output_Clear();
+                ST7735_DrawChar(1,1,'8',ST7735_WHITE,ST7735_BLACK,4);
+                __delay_cycles(3000000);
+                break;
+            case nine:
+                Output_Clear();
+                ST7735_DrawChar(50,62,'9',ST7735_WHITE,ST7735_BLACK,4);
+                __delay_cycles(3000000);
+                break;
+            case wait:
+                __delay_cycles(6000000);
+            }
+}
+/*
+ *Main Function - For Program Execution.
+ */
+void main(void){
+	WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD;		// stop watchdog timer.
+
+	Clock_Init48MHz();
+	sysTick_Timer();
+    ST7735_InitR(INITR_BLACKTAB);
+    ST7735_FillScreen(ST7735_BLACK);
+
+	while(1){
+	    stateCanvas();
+	}
+}
