@@ -1,0 +1,326 @@
+/****************************************************************
+  * Lab One:     Interfacing with a Real Time Clock (RTC) IC Using
+  *              An I2C Bus
+  * Author:      Naim and Mazidi
+  * Adapter:     Kasonde Musonda
+  * Date:        10/09/2020
+  * Professor:   Dr. Brian Krug
+  * Description: This is an adaption of the algorithm used to set
+  *              the date/time/year of the DS1337 using burst write.
+  *              The algorhym also readds from the DS3231 and prints
+  *              to the console of the IDE - CCS.
+  ****************************************************************/
+#include "msp.h"
+#include <stdio.h>
+
+#define SLAVE_ADD 0x68      //Address of DS3231
+#define PORTSCL P6          //SCL Port
+#define SCL     BIT5
+#define PORTSDA P6          //SDA Port
+#define SDA     BIT4
+#define KEYPAD P4           //Define Macros
+#define BANK   0x7F
+
+unsigned int userData[15]={0};        //Array for storing data in the array.
+unsigned char dataRX[20]={0};         //Receive data bank
+
+uint8_t monthTx;                      //month to RTC
+uint8_t monthRx;                       //Month from RTC
+uint8_t dayTx;                        //Day to RTC
+uint8_t dayRx;                        //Day from RTC
+uint8_t yearTx;                       //Year to RTC
+uint8_t yearRx;                       //Year from RTC
+uint8_t hourTx;                       //Hour to RTC
+uint8_t hourRx;                       //hour from RTC
+uint8_t minTx;                        //Minutes to RTC
+uint8_t minRx;                        //Minutes from RTC
+uint8_t secsTx;                       //Seconds to RTC
+uint8_t secsRx;                       //Seconds from RTC
+uint8_t dateTx;                       //Date to RTC
+uint8_t dateRx;                       //Date from RTC
+
+const int STAR_KEY =11;               //Star key on the keypad.
+const int POUND_KEY= 12;              //Pound key on the keypad.
+const int ZERO_KEY=0;                 //Zero key on the keypad.
+int userKey;                          //Key entered from the keypad
+
+/*Function Prototype*/
+void pins_Init(void);
+void init_12c(void);
+void delay_Micro(int micro);
+int Burst_Write(int slaveAdd,unsigned char memAdd,int byteCount,unsigned char* data);
+int Burst_Read(int slaveAdd, unsigned char memAdd, int byteCount,unsigned char* data);
+int Read_Keypad(void);
+void dataToTX(void);
+void dataReceive(void);
+void toBCD(unsigned int dec[]);
+
+/*Configures the pins P4.0 and
+ *P6.1 for UCB1.
+ *@Param:void
+ *@Return:void
+ */
+void pins_Init(void){
+
+    PORTSCL->SEL0 |= SCL;       //CSL Line
+    PORTSCL->SEL1 &= ~SCL;
+
+    PORTSDA->SEL0 |= SDA;       //SDA Line
+    PORTSDA->SEL1 &= ~SDA;
+
+    KEYPAD->SEL0 &= ~BANK;     //sets all buttons from keypad to input.
+    KEYPAD->SEL1 &= ~BANK;
+    KEYPAD->DIR &= ~BANK;
+    KEYPAD->REN |=  BANK;
+    KEYPAD->OUT |=  BANK;
+
+    SysTick -> CTRL = 0;            //Disable systick during step
+    SysTick -> LOAD = 0x00FFFFFF;   //max reload value
+    SysTick -> VAL = 0;             //clears it
+    SysTick -> CTRL = 0x00000005;   //enables systick 3MHz no interrupts
+}
+
+/*Initialization and configuration of UCB1
+ *For  TX/RX of the signal.
+ */
+void init_I2C(void){
+    EUSCI_B1->CTLW0 |= 1;        //Disable UCB1 during config.
+    EUSCI_B1->CTLW0  = 0x0F81;   //7 Bit-Slave ADDR, Master, I2C Synch Mode, SMCLK.
+    EUSCI_B1->BRW    =30;        //CLK Prescaler 3MHz, 30=100KHz
+    EUSCI_B1->CTLW0 &= ~1;       //enable UCB1 after Config.
+}
+
+/*Delay in milliseconds using SysTick Timer
+ *@Param:int
+ *@Return:void
+ */
+void delay_Micro(int micro){
+    SysTick->LOAD = (3*micro)-1;
+    SysTick->VAL = 0;
+    while((SysTick->CTRL & 0x10000)==0){}
+}
+
+/*Use of burst write to write data to consecutive
+ *memory locations.
+ *@Return: int
+ *@Param: int,unsigned char,int, unsigned char*
+ */
+int Burst_Write(int slaveAdd,unsigned char memAdd,int byteCount,unsigned char* data){
+    if(byteCount <= 0)
+        return -1;
+
+        EUSCI_B1->I2CSA  = slaveAdd;      //Setup slave address.
+        EUSCI_B1->CTLW0 |= 0x0010;        //Enable transmitter.
+        EUSCI_B1->CTLW0 |= 0x0002;        //Generate START and send slave address.
+        while(!(EUSCI_B1->IFG & 2));      //Delay till the ready for transmission.
+        EUSCI_B1->TXBUF = memAdd;         //Tx memory address to slave device - DS1337.
+
+        do{
+            while(!( EUSCI_B1->IFG & 2)); //Time delay untill ready to transmit.
+            EUSCI_B1->TXBUF = *data++;    //Sends data to DS1337.
+            byteCount--;
+        }while(byteCount >0);
+
+        while(!( EUSCI_B1->IFG & 2));      //Delay till last transmission is successful
+        EUSCI_B1->CTLW0 |= 0x0004;         //Sends the stop bit.
+        while(EUSCI_B1->CTLW0 & 4);        //Delay till STOP bit sent.
+
+        return 0;
+}
+
+/*Use of burst read to read from the DS1337 from consecutive locations
+ *read: S-(SlaveADD+W) - ACK-memADD-(slaveAdd)-ACK-data-ACK...-data-NACK-P
+ * @Param:int,unsigned char,int, unsigned char*
+ * @Return: int
+ */
+int Burst_Read(int slaveAdd, unsigned char memAdd, int byteCount,unsigned char* data){
+
+    if(byteCount <= 0)
+        return -1;
+
+    EUSCI_B1->I2CSA  = slaveAdd;      //Setup slave address.
+    EUSCI_B1->CTLW0 |= 0x0010;        //Enable transmitter.
+    EUSCI_B1->CTLW0 |= 0x0002;        //Generate START and send slave address.
+
+    while(!(EUSCI_B1->IFG & 2));      //Wait till transmission is complete.
+    EUSCI_B1->TXBUF  = memAdd;        //Send memory address to DS1337.
+    while((EUSCI_B1->IFG & 2));       //Wait till last transmit is complete.
+    EUSCI_B1->CTLW0 &= ~0x0010;       //Enable receiver.
+    EUSCI_B1->CTLW0 |= 0x0002;        //generate RESTART and send slave address.
+    while(EUSCI_B1->CTLW0 & 2);       //Wait till RESTART is complete.
+
+    do{
+        if(byteCount==1)                 //When only one byte of data is left.
+        EUSCI_B1->CTLW0 |= 0x0004;   //Setup to send STOP after the last bit is received.
+        while(!(EUSCI_B1->IFG & 2));     //Wait till data is received.
+        *data++ = EUSCI_B1->RXBUF;       //Read the received data.
+        byteCount--;
+    }while(byteCount);
+
+    while(EUSCI_B1->CTLW0 & 4);         //Wait till STOP is sent.
+
+    return 0;
+}
+
+/*
+ *This function checks for a button press on the keypad
+ *and returns an integer to the main function
+ *to which button was pressed.
+ *@Return: uint8_t
+ *@Param: void
+ */
+int Read_Keypad(void){
+
+ int i = 0; //variable initialization
+ for(i=0; i<=2; i++){  //cycles through columns on keypad (code from lecture slides)
+
+    KEYPAD->DIR |= (0x01 << i);
+    KEYPAD->OUT &= ~(0x01 << i);
+
+   delay_Micro(10);  //Signal settles!
+
+
+  if(!(KEYPAD->IN & BIT3)){  //checks if button in row 0 is pressed
+
+      if(i==0){
+          while(!(KEYPAD->IN & BIT3)){}
+          return 1;
+      }
+      if(i==1){
+          while(!(KEYPAD->IN & BIT3)){}
+          return 2;
+      }
+      if(i==2){
+          while(!(KEYPAD->IN & BIT3)){}
+          return 3;
+      }
+  }
+  if(!(KEYPAD->IN & BIT4)){     //Checks row 2 for button push.
+
+       if(i==0){
+           while(!(KEYPAD->IN & BIT4)){}
+           return 4;
+       }
+       if(i==1){
+           while(!(KEYPAD->IN & BIT4)){}
+           return 5;
+       }
+       if(i==2){
+           while(!(KEYPAD->IN & BIT4)){}
+           return 6;
+       }
+  }
+  if(!(KEYPAD->IN & BIT5)){ //Checks Row 3 for button push.
+
+       if(i==0){
+           while(!(KEYPAD->IN & BIT5)){}
+           return 7;
+       }
+       if(i==1){
+           while(!(KEYPAD->IN & BIT5)){}
+           return 8;
+       }
+       if(i==2){
+           while(!(KEYPAD->IN & BIT5)){}
+           return 9;
+       }
+  }
+  if(!(KEYPAD->IN & BIT6)){ //Check row 4 for button push.
+
+       if(i==0){
+           while(!(KEYPAD->IN & BIT6)){}
+           return 11;
+       }
+       if(i==1){
+           while(!(KEYPAD->IN & BIT6)){}
+           return 0;
+       }
+       if(i==2){
+           while(!(KEYPAD->IN & BIT6)){}
+           return 12;
+       }
+
+       }
+      KEYPAD->DIR &= ~(0x01<< i); //turns columns back to high input state
+      KEYPAD->OUT |= (0x01<< i);
+ }
+ return 13;
+}
+
+/*Prompts used to enter numbers using Keypad
+ *@Return: int.
+ *@Param:void
+ */
+void dataToTX(){
+
+    printf("\nPlease enter date (MMDDYYDATE)\n");
+    printf("And the time to be set (HH:MM:SS)\n");
+    printf("Press '#' once complete entering data and '*' followed by '1'to display set time\n");
+    printf("Press '2'to display the date, and '3' to display the temperature.\n");
+
+    int index=0;                       //count for reverse storage.
+    userKey = Read_Keypad();            //Reads data from the Keypad.
+
+    while(userKey != POUND_KEY){        //Program halts once the # on keypad is pressed.
+        if(userKey != 13 && userKey != STAR_KEY){
+                userData[index]=userKey;
+                index++;
+            }
+        userKey=Read_Keypad();      //Reads the keypad again to repeat the process.
+        }
+}
+
+/*Converts decimal numbers to BCD
+ *@Param:void
+ *@void;
+ */
+void toBCD(unsigned int userData[]){
+    int shift =4;
+    secsTx =  ((userData[0]<<shift) | userData[1]);      //Month of the year.
+    minTx =   ((userData[2]<<shift) | userData[3]);     //Day of the month.
+    hourTx=   ((userData[4]<<shift) | userData[5]);
+    dayTx =   ((userData[6]<<shift) | userData[7]);
+    dateTx=   ((userData[8]<<shift) | userData[9]);
+    monthTx=  ((userData[10]<<shift)| userData[11]);
+    yearTx =  ((userData[12]<<shift)| userData[13]);
+}
+
+/*
+ * Main.c - Function Execution.
+ */
+void main(void){
+
+    WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD; //Stop Watchdog Timer
+
+    unsigned char dataTX[20]={secsTx,minTx,hourTx,dayTx,dateTx,monthTx,yearTx,0};      //Time to transmit to DS3231
+
+    pins_Init();
+    init_I2C();
+    dataToTX();
+    toBCD(userData);
+    Burst_Write(SLAVE_ADD,0,20,dataTX);
+
+    for(;;){
+       init_I2C();
+       Burst_Read(SLAVE_ADD,0,20,dataRX);
+
+       userKey=Read_Keypad();                   //Keypressed on keypad.
+
+      while(userKey==STAR_KEY){                 //Asterix followed by the number 1 pressed
+
+          userKey=Read_Keypad();
+
+          if(userKey==1){
+              printf("Date:%x - %x/%x/%x\n",dataRX[3],dataRX[5],dataRX[4],dataRX[6]);
+
+           }
+          if(userKey==2){
+
+              printf("Time:%d:%x:%x\n",dataRX[2],dataRX[1],dataRX[0]);       //Prints the time and seconds
+           }
+          if(userKey==3){
+              printf("Temperature: %d.%d degrees Celsius",dataRX[17],dataRX[18]);   //Prints temperature to the screen.
+           }
+        }
+    }
+}
