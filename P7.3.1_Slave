@@ -1,0 +1,223 @@
+/***************************************************************
+*Title   :     EGR 326 Interfacing a DC motor to the MSP432 MCU
+*Filename:     Lab_Part_III_Slave.c
+*Authors :     Kasonde Musonda
+*Date    :     10/23/2020
+*Instructor:   Dr. Brian Krug
+*Description:  Part III Lab 7
+***************************************************************/
+#include "msp.h"
+
+#define SLAVE_ADDRESS 0x48  //Slave address
+
+#define IN1PORT P2          //Define Macros
+#define IN1PIN BIT3
+#define IN2PORT P5
+#define IN2PIN BIT1
+#define IN3PORT P3
+#define IN3PIN BIT5
+#define IN4PORT P3
+#define IN4PIN BIT7
+
+enum stepper {stepOne,stepTwo,stepThree,stepFour};  //Enum types for StateMachine
+enum stepper state = stepOne;
+
+char RXData;        //Data receive buffer
+int readData[3];
+int count = 0;
+
+//Function Prototypes
+void motor_init(void);
+void EUSICInit(void);
+void delay_micro(int  mu);
+void step(int steps, int direction);
+void EUSCIB0_IRQHandler(void);
+
+/*Stepper Motor Init
+ *@Param: void
+ *@Return:void
+ */
+void motor_init(void){
+
+    IN1PORT->SEL0 &= ~(IN1PIN);    //setting up In1
+    IN1PORT->SEL1 &= ~(IN1PIN);
+    IN1PORT->DIR |= (IN1PIN);
+    IN1PORT->OUT |= (IN1PIN);
+
+    IN2PORT->SEL0 &= ~(IN2PIN);    //setting up In2
+    IN2PORT->SEL1 &= ~(IN2PIN);
+    IN2PORT->DIR |= (IN2PIN);
+    IN2PORT->OUT |= (IN2PIN);
+
+    IN3PORT->SEL0 &= ~(IN3PIN);    //setting up In3
+    IN3PORT->SEL1 &= ~(IN3PIN);
+    IN3PORT->DIR |= (IN3PIN);
+    IN3PORT->OUT |= (IN3PIN);
+
+    IN4PORT->SEL0 &= ~(IN4PIN);    //setting up In4
+    IN4PORT->SEL1 &= ~(IN4PIN);
+    IN4PORT->DIR |= (IN4PIN);
+    IN4PORT->OUT |= (IN4PIN);
+
+    P1->SEL0 |= BIT6 | BIT7; //P1.6 and P1.7 as UCB0SDA and UCB0SCL
+
+    SysTick->CTRL = 0;          //Disable systick while setting it up
+    SysTick->LOAD = 0x00FFFFFF; //Sets maximum reload value
+    SysTick->VAL = 0;
+    SysTick->CTRL = 0x00000005; //No interrupts, Systick enable====
+}
+
+/*EUSIC_init
+ *@Param: void
+ *@Return: void
+ */
+void EUSIC_Init(void){
+
+    EUSCI_B0->CTLW0 |= EUSCI_B_CTLW0_SWRST;      // Hold EUSCI_B0 module in reset state
+    EUSCI_B0->CTLW0 |= EUSCI_B_CTLW0_MODE_3|EUSCI_B_CTLW0_SYNC;
+    EUSCI_B0->I2COA0 = SLAVE_ADDRESS | EUSCI_B_I2COA0_OAEN;
+    EUSCI_B0->CTLW0 &= ~EUSCI_B_CTLW0_SWRST;    // Clear SWRST to resume operation
+    EUSCI_B0->IFG &= ~EUSCI_B_IFG_RXIFG0;       // Clear EUSCI_B0 RX interrupt flag
+    EUSCI_B0->IE |= EUSCI_B_IE_RXIE0;           // Enable EUSCI_B0 RX interrupt
+
+    NVIC->ISER[0] = 0x00100000;                 // EUSCI_B0 interrupt is enabled in NVIC
+}
+
+/*Systick Timer Adjusted to Milliseconds
+ *@Param: void
+ *@Return:void
+ */
+void delay_micro(int  mu){
+    SysTick->LOAD = mu*3;       //microsecond timer
+    SysTick->VAL = 0;           //Starts the timer counting
+    while ((SysTick->CTRL & 0x00010000) == 0);
+}
+
+/*Furnishes the step and direction for stepper
+ *motor
+ *@Param: int steps and int direction
+ *@Return:void
+ */
+void step(int steps, int direction){
+    int count = 0;
+    //Comment out for half step mode
+    steps = steps * 2;
+
+    //this is the half step method
+    while(1){
+        if(steps <= 80000){
+        switch(state){
+             case stepOne:
+                if(count >= steps) break;
+                IN1PORT->OUT |= (IN1PIN);
+                IN2PORT->OUT |= (IN2PIN);
+                IN3PORT->OUT |= (IN3PIN);
+                IN4PORT->OUT &= ~(IN4PIN);
+
+                delay_micro(2000); //Time Delay.
+                count++;
+                if(direction == 0){ state = stepTwo; break;}
+                if(direction == 1){ state = stepFour; break;}
+
+             case stepTwo:
+
+                 if(count >= steps){break;}
+                 IN1PORT->OUT &= ~(IN1PIN);
+                 IN2PORT->OUT |= (IN2PIN);
+                 IN3PORT->OUT |= (IN3PIN);
+                 IN4PORT->OUT |= (IN4PIN);
+
+                delay_micro(2000);  //Time Delay
+                count++;
+                if(direction == 0){ state = stepThree; break;}
+                if(direction == 1){ state = stepOne; break;}
+
+             case stepThree:
+
+                 if(count >= steps){break;}
+                 IN1PORT->OUT |= (IN1PIN);
+                 IN2PORT->OUT &= ~(IN2PIN);
+                 IN3PORT->OUT |= (IN3PIN);
+                 IN4PORT->OUT |= (IN4PIN);
+
+                 delay_micro(2000);
+                 count++;
+                 if(direction == 0){ state = stepFour; break;}
+                 if(direction == 1){ state = stepTwo; break;}
+
+             case stepFour:
+                 if(count >= steps){break;}
+                 if(count >= steps){break;}
+                 IN1PORT->OUT |= (IN1PIN);
+                 IN2PORT->OUT |= (IN2PIN);
+                 IN3PORT->OUT &= ~(IN3PIN);
+                 IN4PORT->OUT |= (IN4PIN);
+
+                 delay_micro(2000);
+                 count++;
+                 if(direction == 0){ state = stepOne; break;}
+                 if(direction == 1){ state = stepThree; break;}
+
+             default:
+                 if(count >= steps) break;
+                 state = stepOne;
+           }
+        }
+        else break;
+        if(count >= steps) break;
+    }
+}
+
+/*EUSCIB0 Interrupt Handler
+ *@Param: void
+ *@Return:void
+ */
+void EUSCIB0_IRQHandler(void){
+
+    uint32_t status = EUSCI_B0->IFG;        // Get EUSCI_B0 interrupt flag
+    EUSCI_B0->IFG  &=~ EUSCI_B_IFG_RXIFG0;  // Clear EUSCI_B0 RX interrupt flag
+
+    if(status & EUSCI_B_IFG_RXIFG0){        // Check if receive interrupt occurs
+        RXData = EUSCI_B0->RXBUF;           // Load current RXData value to transmit buffer
+        readData[count] = RXData;           //Store the read data into the readData array
+    }
+    count++;                                //Increment to next position in array
+}
+
+/*Main Function - Method Invocation
+ *@Param: void
+ *@Return:void
+ */
+void main(void){
+	WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD; //stop watchdog timer
+
+	//Local Variables
+    int value = 0;      //Value read from I2C
+    int dir = 0;        //0 for positive, 1 for negative
+    int position = 0;   //Total position of stepper motor
+
+	motor_init();
+	EUSIC_Init();
+
+	__enable_irq();     // All interrupts are enabled
+
+	while(1){
+	    if(count == 3) {           //After 3 values have been recieved
+
+            if(readData[0] == 45){ //If the first value is a "-"
+                value = -4 * ((readData[1] - 48)*10 + (readData[2] - 48));  //Convert to decimal from ascii
+                dir = 1; //Negative rotation
+            }else{
+                value = 4 * ((readData[1] - 48)*10 + (readData[2] - 48));   //Convert to decimal from ascii
+                dir = 0; //Positive rotation
+            }
+
+	            position += value;      //Keep track of the total position
+	            step(abs(value), dir);  //Move the stepper motor in the proper direction
+	            printf("Current position: %d\n", position);   //Print the current position
+	            count = 0;  //Reset for reading next I2C data transmission
+
+	        }
+	    }
+
+}
