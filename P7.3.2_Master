@@ -1,0 +1,250 @@
+/***************************************************************
+*Title   :     EGR 326 Interfacing a DC motor to the MSP432 MCU
+*Filename:     Lab_Part_III_Master.c
+*Authors :     Kasonde Musonda
+*Date    :     10/23/2020
+*Instructor:   Dr. Brian Krug
+*Description:  Part III Lab 7
+***************************************************************/
+#include "msp.h"
+#include <stdio.h>
+#
+#define S1 BIT1     //Define Macros
+#define S2 BIT4
+#define SLAVE_ADDRESS 0x48
+
+#define KEYPAD P4           //Define Keypad Macros
+#define BANK   0x7F
+
+uint32_t status1, status2;  //Global Variables Definition
+int TXData[2];
+int i = 0;
+int key,userKey;
+int TXData[2];              //Data transfer array
+
+const int STAR_KEY =11;     //Star key on the keypad.
+const int POUND_KEY= 12;    //Pound key on the keypad.
+const int ZERO_KEY=0;       //Zero key on the keypad.
+
+//Function Prototypes
+void pins_init(void);
+int Read_Keypad(void);
+void EUSCIB0_Init(void);
+void EUSCIB0_IRQHandler(void);
+void PORT1_IRQHandler(void);
+void PORT1_IRQHandler(void);
+void delay_Micro(int micro);
+void dataToTX();
+
+/*Pins P1.1 P1.2 Initialization
+ *@Param:  void
+ *@Return: void
+ */
+void pins_init(){
+
+    P1->DIR &= ~(S1|S2);      //push button 1 on-board MSP
+    P1->REN   = (S1|S2);
+    P1->OUT   = (S1|S2);
+    P1->IE    = (S1|S2);
+    P1->IES   = (S1|S2);
+    P1->IFG   = 0x00;
+    P1->SEL0 |= BIT6 | BIT7;  //P1.6 and P1.7 as UCB0SDA and UCB0SCL
+
+    KEYPAD->SEL0 &= ~BANK;    //sets all buttons from keypad to input.
+    KEYPAD->SEL1 &= ~BANK;
+    KEYPAD->DIR &= ~BANK;
+    KEYPAD->REN |=  BANK;
+    KEYPAD->OUT |=  BANK;
+
+    NVIC->ISER[1] = 0x00000008;// Port P1 interrupt is enabled in NVIC
+}
+
+/*
+ *This function checks for a button press on the keypad
+ *and returns an integer to the main function
+ *to which button was pressed.
+ *@Return: uint8_t
+ *@Param: void
+ */
+int Read_Keypad(void){
+ int i = 0; //variable initialization
+ for(i=0; i<=2; i++){  //cycles through columns on keypad (code from lecture slides)
+
+    KEYPAD->DIR |= (0x01 << i);
+    KEYPAD->OUT &= ~(0x01 << i);
+
+   delay_Micro(10);  //Signal settles!
+
+
+  if(!(KEYPAD->IN & BIT3)){  //checks if button in row 0 is pressed
+
+      if(i==0){
+          while(!(KEYPAD->IN & BIT3)){}
+          return 1;
+      }
+      if(i==1){
+          while(!(KEYPAD->IN & BIT3)){}
+          return 2;
+      }
+      if(i==2){
+          while(!(KEYPAD->IN & BIT3)){}
+          return 3;
+      }
+  }
+  if(!(KEYPAD->IN & BIT4)){     //Checks row 2 for button push.
+
+       if(i==0){
+           while(!(KEYPAD->IN & BIT4)){}
+           return 4;
+       }
+       if(i==1){
+           while(!(KEYPAD->IN & BIT4)){}
+           return 5;
+       }
+       if(i==2){
+           while(!(KEYPAD->IN & BIT4)){}
+           return 6;
+       }
+  }
+  if(!(KEYPAD->IN & BIT5)){ //Checks Row 3 for button push.
+
+       if(i==0){
+           while(!(KEYPAD->IN & BIT5)){}
+           return 7;
+       }
+       if(i==1){
+           while(!(KEYPAD->IN & BIT5)){}
+           return 8;
+       }
+       if(i==2){
+           while(!(KEYPAD->IN & BIT5)){}
+           return 9;
+       }
+  }
+  if(!(KEYPAD->IN & BIT6)){ //Check row 4 for button push.
+
+       if(i==0){
+           while(!(KEYPAD->IN & BIT6)){}
+           return 11;
+       }
+       if(i==1){
+           while(!(KEYPAD->IN & BIT6)){}
+           return 0;
+       }
+       if(i==2){
+           while(!(KEYPAD->IN & BIT6)){}
+           return 12;
+       }
+
+       }
+      KEYPAD->DIR &= ~(0x01<< i); //turns columns back to high input state
+      KEYPAD->OUT |= (0x01<< i);
+ }
+ return 13;
+}
+
+/*EUSCIB0 Initialization
+ *@Param:  void
+ *@Return: void
+ */
+void EUSCIB0_Init(){
+
+    EUSCI_B0->CTLW0 |= EUSCI_B_CTLW0_SWRST;  //like previous set up just with different pins and adding interrupts
+    EUSCI_B0->CTLW0 |= EUSCI_B_CTLW0_MODE_3|EUSCI_B_CTLW0_MST|EUSCI_B_CTLW0_SYNC;
+    EUSCI_B0->CTLW0 |= EUSCI_B_CTLW0_UCSSEL_2;
+    EUSCI_B0->BRW = 0x001E;
+    EUSCI_B0->I2CSA = SLAVE_ADDRESS;
+    EUSCI_B0->CTLW0 &= ~EUSCI_B_CTLW0_SWRST;
+
+    NVIC->ISER[0] = 0x00100000;// EUSCI_B0 interrupt is enabled in NVIC
+}
+
+/*EUSCIB0 Interrupt Handler
+ *@Param: void
+ *@Return:void
+ */
+void EUSCIB0_IRQHandler(void){
+
+    EUSCI_B0->IFG &=~ EUSCI_B_IFG_TXIFG0;
+    if(status1 && EUSCI_B_IFG_TXIFG0){//send pos value
+        EUSCI_B0->TXBUF = 0x2B;
+        while(!(EUSCI_B0->IFG & 2));
+        EUSCI_B0->TXBUF = TXData[1]+48;
+        while(!(EUSCI_B0->IFG & 2));
+        EUSCI_B0->TXBUF = TXData[0]+48;
+        EUSCI_B0->IE &= ~EUSCI_B_IE_TXIE0;
+        status1 = 0;}
+
+    if(status2 && EUSCI_B_IFG_TXIFG0){//send neg value
+        EUSCI_B0->TXBUF = 0x2D;
+        while(!(EUSCI_B0->IFG & 2));
+        EUSCI_B0->TXBUF = TXData[1]+48;
+        while(!(EUSCI_B0->IFG & 2));
+        EUSCI_B0->TXBUF = TXData[0]+48;
+        EUSCI_B0->IE &= ~EUSCI_B_IE_TXIE0;
+        status2 = 0;}
+}
+
+/*Pushbutton Interrupt Handler
+ *@Param:  void
+ *@Return: void
+ */
+void PORT1_IRQHandler(void){
+    status1 = P1->IFG & S1;
+    status2 = P1->IFG & S2;
+    P1->IFG &= ~S1;
+    P1->IFG &= ~S2;
+    if((status1 & S1) | (status2 & S2)) EUSCI_B0->IE |= EUSCI_B_IE_TXIE0;   // Enable EUSCI_A0 TX interrupt
+}
+
+/*Delay in milliseconds using SysTick Timer
+ *@Param:int
+ *@Return:void
+ */
+void delay_Micro(int micro){
+    SysTick->LOAD = (3*micro)-1;
+    SysTick->VAL = 0;
+    //while((SysTick->CTRL & 0x10000)==0);
+}
+
+/*Prompts used to enter numbers using Keypad
+ *@Return: int.
+ *@Param:void
+ */
+void dataToTX(){
+
+    printf("\nEnter number of turns (0-9)followed '#'\n");
+
+    int index=0;                  //count for reverse storage.
+    userKey = Read_Keypad();      //Reads data from the Keypad.
+
+    while(userKey != POUND_KEY){  //Program halts once the # on keypad is pressed.
+        if(userKey != 13 && userKey != STAR_KEY){
+                TXData[index]=userKey;
+                index++;
+            }
+        userKey=Read_Keypad();      //Reads the keypad again to repeat the process.
+        }
+    printf("\nYour Step:%d%d\n", TXData[0], TXData[1]);
+}
+
+/*Main Method-Function Execution
+ *@Param:  void
+ *@Return: void
+ */
+void main(void){
+    WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD;
+
+    pins_init();
+    EUSCIB0_Init();
+    Read_Keypad();
+
+    __enable_irq();  //Enable Global interrupts
+
+    while (EUSCI_B0->CTLW0 & EUSCI_B_CTLW0_TXSTP);
+    EUSCI_B0->CTLW0 |= EUSCI_B_CTLW0_TR | EUSCI_B_CTLW0_TXSTT;
+
+    while(1){
+        dataToTX();
+    }
+}
