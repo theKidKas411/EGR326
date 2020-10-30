@@ -1,0 +1,240 @@
+/***************************************************************
+ Title:        EGR 326: Seven Segment Initialization and data
+               Character Display
+ Filename:     Lab 8: Part I
+ Author(s):    Kasonde Musonda
+ Date:         10/30/2020
+ Instructor:   Professor: Dr.Krug
+ Description:  Printing characters to the 7-Segment Display
+               via the SPI Communication Module.
+****************************************************************/
+#include "msp.h"
+#include <stdbool.h>
+
+#define CSPORT  P5      //Definition of Macros.
+#define CSPIN   BIT0
+#define DINPORT P1
+#define DINPIN  BIT6
+#define CLKPORT P1
+#define CLKPIN  BIT5
+#define BUTTON  P5
+#define BUTTPIN BIT4
+
+#define DELAY 100
+#define DECODE          0x09
+#define DECODE_MODE     0xFF     //decode setting
+#define INTENSITY       0x0A     //intensity address
+#define INTENSITY_MODE  0x03     //intensity setting
+#define SCAN_LIMIT      0x0B     //scan address
+#define SCAN_LIMIT_MODE 0x07     //scan setting
+#define SHUTDOWN        0x0C     //shutdown address
+#define SHUTDOWN_MODE   0x01     //shutdown setting normal operation
+#define DIS_TEST        0x0F     //display address
+#define DIS_TEST_MODE   0x01     //test mode setting
+
+#define DIGIT_0 0x01 //macro for digit addresses
+#define DIGIT_1 0x02
+#define DIGIT_2 0x03
+#define DIGIT_3 0x04
+#define DIGIT_4 0x05
+#define DIGIT_5 0x06
+#define DIGIT_6 0x07
+#define DIGIT_7 0x08
+
+/*Local Variables*/
+bool bFlag = false;
+bool cFlag = false;
+bool tFlag = false;
+
+/*Function Prototypes*/
+void SPI_Init();
+void Button_Init();
+void display_Init(uint8_t intstruction, uint8_t data);
+void SysTick_Init(void);
+void delay_micro(int micro);
+void PORT5_IRQHandler(void);
+uint8_t DebounceSwitch2();
+
+/*Sets the pins the P2.Bit5, bit4 and bits for SPI
+ *Transmission.
+ *@Param: Void
+ *@Return:Void
+ */
+void SPI_Init(){
+
+   CSPORT->SEL0 &= ~CSPIN;       //CS Pin for the Seven Segment toggle.
+   CSPORT->SEL1 &= ~CSPIN;
+   CSPORT->DIR |= CSPIN;
+   CSPORT->REN |= CSPIN;
+   CSPORT->OUT |= CSPIN;
+
+   DINPORT -> SEL0 |= DINPIN;     //Data Transmission pin for SPI.
+   CLKPORT -> SEL0 |= CLKPIN;
+
+   EUSCI_B0 -> CTLW0 |= EUSCI_B_CTLW0_SWRST;         //Hold EUSCI_B0 module in reset state
+   EUSCI_B0 -> CTLW0 |= EUSCI_B_CTLW0_MST
+                                        | EUSCI_B_CTLW0_SYNC
+                                        | EUSCI_B_CTLW0_CKPL
+                                        | EUSCI_B_CTLW0_MSB;
+   EUSCI_B0 -> CTLW0 |= EUSCI_B_CTLW0_UCSSEL_2;    //Select SMCLK as EUSCI_B0 clock
+   EUSCI_B0 -> BRW = 0x0018;                       //Set BITCLK = BRCLK/ (UCBRx+1) = 3 MHz/24 = 128K
+   EUSCI_B0 -> CTLW0 &= ~EUSCI_B_CTLW0_SWRST;      //Resumes program run.
+
+   //Seven Segment Display Initialization.
+  display_Init(DECODE, DECODE_MODE);       //Steps as described by Dr. Krug
+  display_Init(INTENSITY, INTENSITY_MODE);
+  display_Init(SCAN_LIMIT, SCAN_LIMIT_MODE);
+  display_Init(SHUTDOWN, SHUTDOWN_MODE);   //Normal Operation Mode
+}
+
+/*Initializes P5.4 with as GPIO- White Button on Breadboard
+ *@Param: void
+ *@Return: void
+ */
+void Button_Init(){
+
+  BUTTON->SEL0 &= ~BUTTPIN;   //Black and White buttons setup.
+  BUTTON->SEL1 &= ~BUTTPIN;   //BIT4 - Black Button - BIT5--White button.
+  BUTTON->DIR &=  ~BUTTPIN;    //setting bits 4 and 5 as inputs
+  BUTTON->REN |= BUTTPIN;     //enabling pull up resistors
+  BUTTON->OUT |= BUTTPIN;
+  BUTTON->IES |= BUTTPIN;     //high to low trigger
+  BUTTON->IE  |= BUTTPIN;      //enabling interrupts
+  BUTTON->IFG = 0;                //clear flag
+
+  NVIC->ISER[1] = 1 << ((PORT5_IRQn) & 31);
+   __enable_interrupt();
+}
+
+/*Initializes the 7 Seven Segment Display per the
+ *Instructions from Dr. Krug during Lab Session 7.
+ *@Param:  Void
+ *@Return: Void
+ */
+void display_Init(uint8_t instruction, uint8_t data){
+
+    CSPORT -> OUT &= ~CSPIN;
+    _delay_cycles(200);
+    while(!( EUSCI_B0->IFG&2));
+    EUSCI_B0->TXBUF = instruction;
+    while(!( EUSCI_B0->IFG&2));
+    EUSCI_B0->TXBUF =data;
+    while(!( EUSCI_B0->IFG&2));
+    _delay_cycles(200);
+    CSPORT -> OUT |= CSPIN;
+}
+
+/*SysTick Setup 3MHz, refer to lab 6 for 48MHz version
+ *@Param: void
+ *@Return:void
+ */
+void SysTick_Init(void){
+    SysTick -> CTRL = 0;            //disable systick during setup
+    SysTick -> LOAD = 0x00FFFFFF;   //max reload value
+    SysTick -> VAL = 0;             //clears it
+    SysTick -> CTRL = 5;   //enables systick 3MHz no interrupts
+}
+
+/* SysTick Setup 3MHz, refer to lab 6 for 48MHz version
+ *@Param: void
+ *@Return:void
+ */
+void delay_micro(int micro){//delay in microseconds using SysTick
+    SysTick->LOAD = (3*micro)-1;
+    SysTick->VAL = 0;
+    while((SysTick->CTRL & BIT(16))==0);
+    }
+
+/*Interrupt Handler for White Button
+ *@Param: Void
+ *@Return:Void
+ */
+void PORT5_IRQHandler(void){
+    if(BUTTON -> IFG & BUTTPIN)
+        bFlag = true;
+    BUTTON -> IFG &= ~BUTTPIN;
+}
+
+/*Main Function - For Program Execution
+ *@Param:  Void
+ *@Return: Void
+ */
+void main(void){
+	WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD; // stop watchdog timer
+
+	//Local Variable Declaration
+	uint8_t C1 = 0, C2 = 0, C3 = 0, C4 = 0;
+	uint8_t T1 = 0, T2 = 0, T3 = 0, T4 = 0;
+	int count = 0;
+
+	//Method Invocation.
+	SPI_Init();
+	SysTick_Init();
+	Button_Init();
+
+	display_Init(DIGIT_0, C1);
+	display_Init(DIGIT_1, C2);
+	display_Init(DIGIT_2, C3);
+	display_Init(DIGIT_3, C4);
+	display_Init(DIGIT_4, C1);
+	display_Init(DIGIT_5, C2);
+	display_Init(DIGIT_6, C3);
+	display_Init(DIGIT_7, C4);
+
+	while(1){
+
+      if(bFlag){
+        _delay_cycles(15000);
+
+        while(!(BUTTON -> IN & BUTTPIN));
+
+            bFlag = false;
+            tFlag = !tFlag;
+
+            if(!tFlag){
+               C1++;
+            if(C1 >9){
+               C1 = 0;
+               C2++;
+            }
+            if(C2>9){
+               C2 = 0;
+               C3++;
+            }
+            if(C3>9){
+              C3 = 0;
+              C4++;
+            }
+            if(C4>9){
+              C4 = 0;
+            }
+
+            display_Init(DIGIT_4, C1); //Updates count to display
+            display_Init(DIGIT_5, C2);
+            display_Init(DIGIT_6, C3);
+            display_Init(DIGIT_7, C4);
+            }
+        }else  if(tFlag && (count >= 500)){
+            T1++;
+            if(T1 >9){
+              T1 = 0;
+              T2++;
+            }
+            if(T2>9){
+               T2 = 0;
+               T3++;
+            }
+            _delay_cycles(3000000);
+            display_Init(DIGIT_0, T1);//updates timer to display
+            display_Init(DIGIT_1, T2);
+            display_Init(DIGIT_2, T3);
+            display_Init(DIGIT_3, T4);
+
+            if(T3>=1){
+               T3 = 0;
+            }
+            count = 0;
+	        }
+	       count++;
+    }
+}
