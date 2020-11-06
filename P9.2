@@ -1,0 +1,341 @@
+/****************************************************************************
+ Title:        EGR 326 Lab # 09
+ Filename:     Part_I.c, ST7735.h, ST7735.c, image.h
+ Author(s):    Kasonde Musonda
+ Date:         11/06/2020
+ Instructor:   Professor: Dr.Krug
+ Description:  Part II of Lab 09
+ Note:         ValvanoWare code was used as recommended by Dr. Krug, from
+               :http://users.ece.utexas.edu/~valvano/arm/downloadmsp432.html.
+*****************************************************************************/
+#include "msp.h"
+#include "stdio.h"
+#include "ST7735.h"
+#include "image.h"
+#include "string.h"
+
+/*Define Macros*/
+#define MPORT P10       //Motor pins Macro Declaration.
+#define IN1   BIT0
+#define IN2   BIT1
+#define IN3   BIT2
+#define IN4   BIT3
+
+#define HALL    P6     //Hall Effect Macro Declaration.
+#define HALLPIN BIT6
+
+#define BTPORT  P6     //Button Macro Declaration.
+#define BTPIN   BIT5
+
+int interrupt_flag = 0;    //Global Variable button
+int count = 0;             //Count variable for PulseWidth Modulation Calculations.
+int pmw =0;                //Pulse Widith Modulation for Stepper motor
+int speed=0;               //Speed of stepper motor
+int rpm=0;                 //Ravs per Minute of stepper motor
+int display=0;             //Display flag
+char speedD[3];            //Arrays for displaying Speed and RPM
+char rpmD[10];
+
+#define STEP1 1                     //Steps for StateMachine.
+#define STEP2 2
+#define STEP3 3
+#define STEP4 4
+
+/*Function Prototypes*/
+void Clock_Init48MHz(void);
+void pins_Init(void);
+void delay_Milli();
+uint8_t debounce_button(void);
+void motorFunction(void);
+void printFunction(void);
+void toString(int n, char s[]);
+void PORT6_IRQHandler(void);
+void TA2_N_IRQHandler(void);
+void backwards(char s[]);
+
+/*Configures the Flash Wait-State,HFXT to use 48MHz - Provided.
+ *Crystal source to MCLK and HSMCLK
+ *@Param: void
+ *@Return: void
+ */
+void Clock_Init48MHz(void){
+
+    // Configure Flash wait-state to 1 for both banks 0 & 1
+       FLCTL->BANK0_RDCTL = (FLCTL->BANK0_RDCTL & ~(FLCTL_BANK0_RDCTL_WAIT_MASK)) |
+       FLCTL_BANK0_RDCTL_WAIT_1;
+       FLCTL->BANK1_RDCTL = (FLCTL->BANK0_RDCTL & ~(FLCTL_BANK0_RDCTL_WAIT_MASK)) |
+       FLCTL_BANK1_RDCTL_WAIT_1;
+
+    //Configure HFXT to use 48MHz crystal, source to MCLK & HSMCLK*
+       PJ->SEL0 |= BIT2 | BIT3;                     // Configure PJ.2/3 for HFXT function
+       PJ->SEL1 &= ~(BIT2 | BIT3);
+       CS->KEY = CS_KEY_VAL ;                       // Unlock CS module for register access
+       CS->CTL2 |= CS_CTL2_HFXT_EN | CS_CTL2_HFXTFREQ_6 | CS_CTL2_HFXTDRIVE;
+      while(CS->IFG & CS_IFG_HFXTIFG)
+                    CS->CLRIFG |= CS_CLRIFG_CLR_HFXTIFG;
+
+    /* Select MCLK & HSMCLK = HFXT, no divider */
+      CS->CTL1 = CS->CTL1 & ~(CS_CTL1_SELM_MASK     |
+                              CS_CTL1_DIVM_MASK     |
+                              CS_CTL1_SELS_MASK     |
+                              CS_CTL1_DIVHS_MASK)   |
+                              CS_CTL1_SELM__HFXTCLK |
+                              CS_CTL1_SELS__HFXTCLK;
+
+      CS->CTL1 = CS->CTL1 |CS_CTL1_DIVS_2;    // change the SMCLK clock speed to 12 MHz.
+
+      CS->KEY = 0;                            // Lock CS module from unintended accesses
+
+}
+
+/* This function initializes the pins below for stepper motor implementation
+ * and the Systick timer without GPIO interrupts.
+ * IN1 -> P10.0
+ * IN2 -> P10.1
+ * IN3 -> P10.2
+ * IN4 -> P10.3
+ */
+void pins_Init(void){
+
+    //Motor as Plain GPIO.
+    MPORT->SEL0 &= ~(IN1 | IN2 | IN3 | IN4 );
+    MPORT->SEL1 &= ~(IN1 | IN2 | IN3 | IN4 );
+    MPORT->DIR  |=  (IN1 | IN2 | IN3 | IN4 );
+    MPORT->OUT  &=  (IN1 | IN2 | IN3 | IN4 );
+
+    //Hall Port Secondary function for Timer A.
+    HALL->SEL0 |= (HALLPIN);        //TA2.CCI2A secondary function for data capture from sensor
+    HALL->SEL1 &= ~(HALLPIN);       //TA2.CCI2A Secondary function for data capture from sensor
+    HALL->DIR &= ~(HALLPIN);
+
+    TIMER_A2->CTL   |=  0b0000000111100010;
+    TIMER_A2->CCTL[3] = 0b0100100100010000;
+
+    BTPORT->SEL0 &= ~(BTPIN);   //White button on breadboard.
+    BTPORT->SEL1 &= ~(BTPIN);
+    BTPORT->DIR  &= ~(BTPIN);
+    BTPORT->REN  |= (BTPIN);
+    BTPORT->OUT  |= (BTPIN);
+    BTPORT->IES  |= (BTPIN);
+    BTPORT->IE   |= (BTPIN);
+    BTPORT->IFG   = 0;
+
+    NVIC->ISER[1] = 1 << ((PORT6_IRQn) & 31); //Enable interrupt in NVIC vector
+    NVIC->ISER[0] = 1 << ((TA2_N_IRQn) & 31); // Enable interrupt in NVIC vector
+    __enable_interrupt();
+}
+
+/*Delay in milliseconds using SysTick Timer
+ *@Param:int
+ *@Return:void
+ */
+void delay_Milli(){
+    SysTick->CTRL = 0;          //Systick Timer initalization
+    SysTick->LOAD = 700000-1;
+    SysTick->VAL = 0;
+    SysTick->CTRL = 5;
+
+    while ((SysTick->CTRL & 0x00010000) == 0);
+}
+
+/*This function debounces the first pushbutton using Jack's Ganssle's code.
+ *@Param: void
+ *@Return: uint8_t
+ */
+uint8_t debounce_button(void){
+    static uint16_t state = 0; // current state of the button
+
+    // Note: 0xf800 is the delay time
+    /*
+     * This line shifts the current value of state over by 1. It then bit wise or's
+     * the value of Oxf800 so that the first 5 bits are allow ones. This
+     * makes it so that the first 4 bits are not used. It will also
+     * bit wise or the value with the reading at P2.5 and shifted over so that
+     * the read value located at bit 0 in the variable state. Eventually, if the
+     * pushbutton keeps reading so, the pushbutton will be debounce when the 10
+     * right most bits are all 0.
+     */
+    state = (state << 1) | (BTPORT->IN & BTPIN ) >> 5 | 0xf800;
+    // Checks to see the 10 right most bits are 0, if so, then it is debounced
+    if (state == 0xfc00){
+        return 1;
+    }
+    return 0;
+}
+
+/*Commences movement in the motor function
+ *@Param: void
+ *@Return:void
+ */
+void motorFunction(void){
+
+    int i = 0;
+    int step_num = 10000;
+    int state = STEP1;
+
+    while(interrupt_flag==1){
+        for(i = 0; i < step_num; i++){
+            switch (state){
+                case STEP1:
+
+                    MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                    MPORT->OUT |= (IN1 | IN2);
+                    state=STEP2;
+                    break;
+
+                case STEP2:
+                    MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                    MPORT->OUT |= (IN2 | IN3);
+                    state=STEP3;
+                    break;
+
+                case STEP3:
+                    MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                    MPORT->OUT |= (IN3 | IN4);
+                    state=STEP4;
+                    break;
+
+                case STEP4:
+                    MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                    MPORT->OUT |= (IN1 | IN4);
+                    state=STEP1;
+                    break;
+
+                default:
+                    MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                    state = STEP1;
+            }
+            printFunction();
+            delay_Milli();
+        }
+    }
+}
+
+/*Updates the status of the inmaginary door - Door sensor update
+ *@Param: void
+ *@Return:void
+ */
+void printFunction(void){
+   if(display==1){
+       rpm = (((1000*1000*60)/(2*pmw*250))+rpm)/2;  //calc rpm 250us by the number of counts
+       speed = ((((rpm*60)*37.699)/5280)+speed)/2;  // calc speed
+
+       toString(speed, speedD);
+       toString(rpm, rpmD);
+
+       ST7735_SetCursor(5,8);       //Ravs per minute displayed to the LCD
+       ST7735_OutString(rpmD);
+       ST7735_SetCursor(9,8);
+       ST7735_OutString("RPM");
+
+       ST7735_SetCursor(5,9);       //Speed per Mile displayed to the LCD
+       ST7735_OutString(speedD);
+       ST7735_SetCursor(9,9);
+       ST7735_OutString("miles/hr");
+
+       display=0;   //Reset flag at the end of the run.
+   }else{
+       toString(0, 0);
+       toString(0, 0);
+
+       ST7735_SetCursor(5,8);       //Ravs per minute displayed to the LCD
+       ST7735_OutString(rpmD);
+       ST7735_SetCursor(9,8);
+       ST7735_OutString("RPM");
+
+       ST7735_SetCursor(5,9);       //Speed per Mile displayed to the LCD
+       ST7735_OutString(speedD);
+       ST7735_SetCursor(9,9);
+       ST7735_OutString("miles/hr");
+   }
+}
+
+/*Parses integer values to strings
+ *@param: int, char array.
+ *@Return:void
+ */
+void toString(int n, char s[]){
+
+    int i, sign;
+    if ((sign = n) < 0)  //record sign.
+        n = -n;          // make n positive.
+        i = 0;
+    do{       /* generate digits in reverse order */
+        s[i++] = n % 10 + '0';   /* get next digit */
+      } while ((n /= 10) > 0);     /* delete it */
+   if (sign < 0)
+        s[i++] = '-';
+        s[i] = '\0';
+
+   backwards(s);
+}
+/*Port_6 Button Interrupt Handler
+ *@Param: void
+ *@Return:void
+ */
+void PORT6_IRQHandler(void){
+
+    if (BTPORT->IFG & BTPIN){
+        interrupt_flag = 1;       //Set flag to 1
+    }
+    HALL->IFG = 0;
+}
+
+/*Timer A2 interrupt Handler for Hall Effect Sensor
+ *@Param: void
+ *@Return:void
+ */
+void TA2_N_IRQHandler(void){
+
+if(TIMER_A2->CCTL[3] & (TIMER_A_CCTLN_CCIFG)){
+    if(count==1){
+        pmw = TIMER_A2->CCR[3]; // Get current count
+        count = 0;
+        display = 1;
+    }else{
+        TIMER_A2->CTL |= TIMER_A_CTL_CLR;
+        count = 1;
+        display = 1;
+        }
+    }
+    TIMER_A2->CCTL[3] &= ~(TIMER_A_CCTLN_CCIFG);    // Clear the interrupt flag
+}
+
+/*Function reverses the printing sequence of a given RPM.
+ *@Param: char
+ *@Return: void
+ */
+void backwards(char s[]){
+
+    int i, j;
+    char c;
+ for (i = 0, j = strlen(s)-1; i<j; i++, j--) {
+        c = s[i];
+        s[i] = s[j];
+        s[j] = c;
+    }
+}
+/*Main Function - Function Execution
+ *@Param: void
+ *@Return:void
+ */
+void main(void){
+
+    WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD; // stop watchdog timer
+
+    Clock_Init48MHz();
+    pins_Init();
+
+    /*LCD Initialization*/
+    ST7735_InitR(INITR_GREENTAB);
+    Output_On();
+    ST7735_DrawBitmap(4,160,Kilmonger,120,160); //Splash screen for 4 seconds.
+    _delay_cycles(60000000);
+    ST7735_FillScreen(ST7735_BLACK);
+    ST7735_SetCursor(4,1);                      //Prints to the screen
+    ST7735_OutString("Speed Demon!!!\n");
+
+    while(1){
+       motorFunction();
+    }
+}
