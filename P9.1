@@ -1,0 +1,267 @@
+/****************************************************************************
+ Title:        EGR 326 Lab # 09
+ Filename:     Part_I.c, ST7735.h, ST7735.c, image.h
+ Author(s):    Kasonde Musonda
+ Date:         11/06/2020
+ Instructor:   Professor: Dr.Krug
+ Description:  Part I of Lab 09
+ Note:         ValvanoWare code was used as recommended by Dr. Krug, from
+               :http://users.ece.utexas.edu/~valvano/arm/downloadmsp432.html.
+*****************************************************************************/
+#include "msp.h"
+#include "stdio.h"
+#include "ST7735.h"
+#include "image.h"
+
+/*Define Macros*/
+#define MPORT P10       //Motor pins Macro Declaration.
+#define IN1   BIT0
+#define IN2   BIT1
+#define IN3   BIT2
+#define IN4   BIT3
+
+#define HALL    P6     //Hall Effect Macro Declaration.
+#define HALLPIN BIT6
+
+#define BTPORT  P6     //Button Macro Declaration.
+#define BTPIN   BIT5
+
+volatile int interrupt_flag = 0; //Global Variable button
+volatile int doorOpen = 0;
+volatile int doorClosed =0;
+
+#define STEP1 1         //Steps for statemachine.
+#define STEP2 2
+#define STEP3 3
+#define STEP4 4
+
+/*Function Prototypes*/
+void Clock_Init48MHz(void);
+void pins_Init(void);
+void delay_Milli();
+uint8_t debounce_button(void);
+void motorFunction(void);
+void doorFunction(void);
+void PORT6_IRQHandler(void);
+
+/*Configures the Flash Wait-State,HFXT to use 48MHz - Provided.
+ *Crystal source to MCLK and HSMCLK
+ *@Param: void
+ *@Return: void
+ */
+void Clock_Init48MHz(void){
+
+    // Configure Flash wait-state to 1 for both banks 0 & 1
+       FLCTL->BANK0_RDCTL = (FLCTL->BANK0_RDCTL & ~(FLCTL_BANK0_RDCTL_WAIT_MASK)) |
+       FLCTL_BANK0_RDCTL_WAIT_1;
+       FLCTL->BANK1_RDCTL = (FLCTL->BANK0_RDCTL & ~(FLCTL_BANK0_RDCTL_WAIT_MASK)) |
+       FLCTL_BANK1_RDCTL_WAIT_1;
+
+    //Configure HFXT to use 48MHz crystal, source to MCLK & HSMCLK*
+       PJ->SEL0 |= BIT2 | BIT3;                     // Configure PJ.2/3 for HFXT function
+       PJ->SEL1 &= ~(BIT2 | BIT3);
+       CS->KEY = CS_KEY_VAL ;                       // Unlock CS module for register access
+       CS->CTL2 |= CS_CTL2_HFXT_EN | CS_CTL2_HFXTFREQ_6 | CS_CTL2_HFXTDRIVE;
+      while(CS->IFG & CS_IFG_HFXTIFG)
+                    CS->CLRIFG |= CS_CLRIFG_CLR_HFXTIFG;
+
+    /* Select MCLK & HSMCLK = HFXT, no divider */
+      CS->CTL1 = CS->CTL1 & ~(CS_CTL1_SELM_MASK     |
+                              CS_CTL1_DIVM_MASK     |
+                              CS_CTL1_SELS_MASK     |
+                              CS_CTL1_DIVHS_MASK)   |
+                              CS_CTL1_SELM__HFXTCLK |
+                              CS_CTL1_SELS__HFXTCLK;
+
+      CS->CTL1 = CS->CTL1 |CS_CTL1_DIVS_2;    // change the SMCLK clock speed to 12 MHz.
+
+      CS->KEY = 0;                            // Lock CS module from unintended accesses
+
+}
+
+/* This function initializes the pins below for stepper motor implementation
+ * and the Systick timer without GPIO interrupts.
+ * IN1 -> P10.0
+ * IN2 -> P10.1
+ * IN3 -> P10.2
+ * IN4 -> P10.3
+ */
+void pins_Init(void){
+
+    //Motor as Plain GPIO.
+    MPORT->SEL0 &= ~(IN1 | IN2 | IN3 | IN4 );
+    MPORT->SEL1 &= ~(IN1 | IN2 | IN3 | IN4 );
+    MPORT->DIR  |=  (IN1 | IN2 | IN3 | IN4 );
+    MPORT->OUT  &=  (IN1 | IN2 | IN3 | IN4 );
+
+    //Hall Port GPIO  with GPIO interrupts.
+    HALL->SEL0 &= ~(HALLPIN);  //setting up button as interrupt
+    HALL->SEL1 &= ~(HALLPIN);
+    HALL->DIR  &= ~(HALLPIN);
+    HALL->REN  |= (HALLPIN);   //enable resistor
+    HALL->OUT  |= (HALLPIN);   //enable pull up
+    HALL->IES  |= (HALLPIN);   //set pin as interrupt high to low
+    HALL->IE   |= (HALLPIN);   //enable interrupt for Px.x
+    HALL->IFG  &= (HALLPIN);   //clears interrupt flag
+
+    BTPORT->SEL0 &= ~(BTPIN);   //White button on breadboard.
+    BTPORT->SEL1 &= ~(BTPIN);
+    BTPORT->DIR  &= ~(BTPIN);
+    BTPORT->REN  |= (BTPIN);
+    BTPORT->OUT  |= (BTPIN);
+    BTPORT->IES  |= (BTPIN);
+    BTPORT->IE   |= (BTPIN);
+    BTPORT->IFG   = 0;
+
+    NVIC->ISER[1] = 1 << ((PORT6_IRQn) & 31);
+    __enable_interrupt();
+}
+
+/*Delay in milliseconds using SysTick Timer
+ *@Param:int
+ *@Return:void
+ */
+void delay_Milli(){
+    SysTick->CTRL = 0;          //Systick Timer initalization
+    SysTick->LOAD = 700000-1;
+    SysTick->VAL = 0;
+    SysTick->CTRL = 5;
+}
+
+/*This function debounces the first pushbutton using Jack's Ganssle's code.
+ *@Param: void
+ *@Return: uint8_t
+ */
+uint8_t debounce_button(void){
+    static uint16_t state = 0; // current state of the button
+
+    // Note: 0xf800 is the delay time
+    /*
+     * This line shifts the current value of state over by 1. It then bit wise or's
+     * the value of Oxf800 so that the first 5 bits are allow ones. This
+     * makes it so that the first 4 bits are not used. It will also
+     * bit wise or the value with the reading at P2.5 and shifted over so that
+     * the read value located at bit 0 in the variable state. Eventually, if the
+     * pushbutton keeps reading so, the pushbutton will be debounce when the 10
+     * right most bits are all 0.
+     */
+    state = (state << 1) | (BTPORT->IN & BTPIN ) >> 5 | 0xf800;
+    // Checks to see the 10 right most bits are 0, if so, then it is debounced
+    if (state == 0xfc00){
+        return 1;
+    }
+    return 0;
+}
+
+/*Commences movement in the motor function
+ *@Param: void
+ *@Return:void
+ */
+void motorFunction(void){
+
+    int i = 0;
+    int step_num = 100;
+    int state = STEP1;
+
+    while(interrupt_flag==1){
+        for(i = 0; i < step_num; i++){
+            switch (state){
+                case STEP1:
+
+                    MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                    MPORT->OUT |= (IN1 | IN2);
+                    doorFunction();
+                    state=STEP2;
+                    break;
+
+                case STEP2:
+                    MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                    MPORT->OUT |= (IN2 | IN3);
+                    doorFunction();
+                    state=STEP3;
+                    break;
+
+                case STEP3:
+                    MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                    MPORT->OUT |= (IN3 | IN4);
+                    doorFunction();
+                    state=STEP4;
+                    break;
+
+                case STEP4:
+                    MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                    MPORT->OUT |= (IN1 | IN4);
+                    doorFunction();
+                    state=STEP1;
+                    break;
+
+                default:
+                    MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                    state = STEP1;
+            }
+            delay_Milli();
+        }
+    }
+}
+
+/*Updates the status of the inmaginary door - Door sensor update
+ *@Param: void
+ *@Return:void
+ */
+void doorFunction(void){
+    if(doorClosed==1){
+       ST7735_SetCursor(8,8);
+       ST7735_OutString("CLOSED!\n");
+    }else{
+        Output_Clear();
+        ST7735_SetCursor(8,8);
+        ST7735_OutString("OPEN!\n");
+    }
+}
+
+/*Port_6 Button Interrupt Handler
+ *@Param: void
+ *@Return:void
+ */
+void PORT6_IRQHandler(void){
+
+    if (BTPORT->IFG & BTPIN){
+        interrupt_flag = 1;       //Set flag to 1
+    }
+
+   if(HALL->IFG & HALLPIN){
+      if(!(HALL->IN & HALLPIN)){   //door is closed
+          doorClosed = 1;
+          HALL->IES &= ~(HALLPIN);   //set pin as interrupt high to low
+      }else{                       //for door open
+          doorClosed = 0;
+          HALL->IES |= (HALLPIN);   //set pin as interrupt high to low
+      }
+    }
+    HALL->IFG = 0;
+}
+
+/*Main Function - Function Execution
+ *@Param: void
+ *@Return:void
+ */
+void main(void){
+
+	WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD; // stop watchdog timer
+
+	Clock_Init48MHz();
+	pins_Init();
+
+	/*LCD Initialization*/
+	ST7735_InitR(INITR_GREENTAB);
+	Output_On();
+	ST7735_DrawBitmap(4,160,Kilmonger,120,160); //Splash screen for 4 seconds.
+	_delay_cycles(60000000);
+	ST7735_FillScreen(ST7735_BLACK);
+    ST7735_SetCursor(8,1);                      //Prints to the screen
+    ST7735_OutString("DOOR\n");
+
+	while(1){
+	   motorFunction();
+	}
+}
