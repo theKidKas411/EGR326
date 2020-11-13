@@ -15,6 +15,8 @@
 
 #define BUTTON P6   //Macro definition
 #define WHITE  BIT5
+#define LED     P2
+#define ONBOARD BIT0;
 
 /*Global Variables*/
 int reset=0;
@@ -31,8 +33,12 @@ void backwards(char s[]);
 void flashTime(void);
 void PORT4_IRQHandler(void);
 uint8_t DebounceSwitch(void);
+void flash_LED(void);
+void SysTick_delay(int delay);
 
-/*Initialization Function
+
+/*Initialization Function of the button connecter to P6.5
+ *the onboard LED connected to P2.0 and the Systick Timer.
  *@Param:  void
  *@Return: void
  */
@@ -43,9 +49,20 @@ void init(void){
   BUTTON->DIR  &= ~WHITE;   //setting bits 4 and 5 as inputs
   BUTTON->REN  |= WHITE;    //enabling pull up resistors
   BUTTON->OUT  |= WHITE;
-  BUTTON->IES  |= WHITE;     //high to low trigger
-  BUTTON->IE   |= WHITE;     //enabling interrupts
-  BUTTON->IFG = 0;           //clear flag
+  BUTTON->IES  |= WHITE;    //high to low trigger
+  BUTTON->IE   |= WHITE;    //enabling interrupts
+  BUTTON->IFG = 0;          //clear flag
+
+  LED->SEL0 &=~ ONBOARD;     //simple I/O
+  LED->SEL1 &=~ ONBOARD;
+  LED->DIR  |=  ONBOARD;
+  LED->OUT  &=~ ONBOARD;     //all LEDs start off
+
+  SysTick -> CTRL = 0;            //disable Systick during setup
+  SysTick -> LOAD = 0x00FFFFFF;   //load maximum reload value in systick
+  SysTick -> VAL  = 0;            //any write to this register clears the timer
+  SysTick -> CTRL = 0x00000005;   //enable SysTick, CPU clock, enable interrupts
+
 
   NVIC_EnableIRQ(PORT6_IRQn);
   NVIC_SetPriority(PORT6_IRQn, 1); //setting P4 interrupts to have priority
@@ -85,16 +102,27 @@ void Clock_Init48MHz(void){
       CS->KEY = 0;                            // Lock CS module from unintended accesses
 }
 
-/*SysTick Timer Init
- *@Param:  void
+/*LED Flash at a half second flash
+ *@Param: void
+ *@Return:void
+ */
+void flash_LED(void){
+    P2->OUT |= BIT0;        //Outputs High
+    SysTick_delay(5);       //Delay half second
+    P2->OUT &=~ BIT0;       //Outputs LOW
+}
+
+/*Systick Delay at in Milli seconds - Slighlty altered to
+ *Match a second
+ *@Param: Void
  *@Return: void
  */
-void systick_delay(void){
+void SysTick_delay(int delay){
 
-   SysTick->CTRL = 0; //turning systick off
-   SysTick->LOAD = 3000000-1; //setting timer value
-   SysTick->VAL = 0;
-   SysTick->CTRL = 7; //enable systick with interrupts
+    SysTick -> LOAD = (delay * (4890000)) - 1;        //sets the delay time in tenths of a second
+    SysTick -> VAL  = 0;                              //resets count
+    //wait for flag to be SET (timeout happened)
+    while((SysTick -> CTRL & 0x00010000) == 0);
 }
 
 /*Watch Dog Timer Initialization at 2^15 overflow rate
@@ -106,7 +134,7 @@ void watchDog_Init(void){
 
     WDT_A->CTL = 0x5A24;        //ACLK as clock source,
     CS->KEY = CS_KEY_VAL;       //Password render before division by 4 to amount to 4s.
-    CS->CTL1 |= CS_CTL1_DIVA_4; //Division by 4.
+    CS->CTL1 |= CS_CTL1_DIVA_3; //Division by 4.
 }
 
 /*Parses integer values to strings
@@ -185,11 +213,10 @@ uint8_t DebounceSwitch(void){
  *@Return: void
  */
 void main(void){
-   watchDog_Init(); //Method Invocation.
-   init();
-   Clock_Init48MHz();
 
-   /*LCD Initialization*/
+   watchDog_Init();                  //Watch Dog Timer instantiation.
+   init();                           //GPIO, Systick Instantiation
+   Clock_Init48MHz();                //SPI Instantiation for the LCD Communication.
    ST7735_InitR(INITR_GREENTAB);
    Output_On();
    ST7735_DrawBitmap(4,160,Kilmonger,120,160); //Splash screen for 4 seconds.
@@ -197,18 +224,21 @@ void main(void){
    _delay_cycles(30000000);
 
    ST7735_FillScreen(ST7735_BLACK);
-   ST7735_SetCursor(4,1);                      //Prints to the screen
+   ST7735_SetCursor(4,1);
    ST7735_OutString("KICK THAT DOG!\n");
 
    NVIC->ISER[0] = 1 << ((WDT_A_IRQn) & 31);
    __enable_irq();
 
+   flash_LED();
+
    while(1){
        flashTime();
-       _delay_cycles(30000000);
+       _delay_cycles(20000000);
 
        if((reset==1)){
            WDT_A->CTL = 0x5A08;
+           count =0;
        }
        reset=0;
        WDT_A->CTL = 0x5A24;
