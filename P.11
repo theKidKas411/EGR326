@@ -1,0 +1,562 @@
+/**********************************************
+Storing data on an external EEPROM chip via I2C
+from the RTC. To store and retrieve in a non-
+volatile memory
+
+Author:    Kasonde Musonda
+Filename:  Lab11.c
+**********Hardware Connection RTC**************/
+//RTCSCL - P6.5
+//RTCSDA - P6.4
+/**********************************************/
+#include "msp.h"
+#include "stdio.h"
+
+#define EEPROM_ADD 0x50 //Address of EEPROM CHIP - on common I2C line.
+#define RTC_ADD 0x68    //Address of DS3231
+#define PORT    P6      //SCL Port
+#define EESCL   BIT5
+#define EESDA   BIT4
+#define BUTWIT  P5      //white Button
+#define WHITE   BIT0    //White Pin
+#define BUTBLK  P4      //Black Button
+#define BLACK   BIT0    //White Pin
+
+/*Global Variables*/
+int buttonOneFlag = 0; //Flag for black button.
+int buttonTwoFlag = 0; //Flag for white button.
+int day;               //Day of the week.
+int count=0;
+int countOne=0;
+uint8_t readMon;       //Month from the RTC module.
+uint8_t readDate;      //Date from the RTC module.
+uint8_t readYear;      //Year from the RTC module.
+uint8_t readSec;       //Seconds from the RTC module.
+uint8_t readMins;      //Mins from the RTC module.
+uint8_t readHour;      //Hours from the RTC module.
+uint8_t RTC_Set[15] = {0x30, 0x30, 0x09, 0x04, 0x20, 0x11, 0x20};    //09:30:30 11/20/20 Week day: 5
+
+unsigned char DataRX_RTC[19]; //Data retrieved from the Real Time Clock
+unsigned char DataTX_EE[30];  //Data to be saved to the EEPROM External chip.
+unsigned char DataRX_EE[30];  //Data retrieved from EE
+
+enum states {timeOne,timeTwo,timeThree,timeFour,timeFive};
+enum states current = timeOne;
+
+/*Function Prototype*/
+void pins_Init(void);
+void button_Init(void);
+void eeeprom_I2C_Init(void);
+uint8_t DebounceSwitch1();
+uint8_t DebounceSwitch2();
+void PORT5_IRQHandler();
+void PORT4_IRQHandler();
+int  RTC_Write(int slaveAdd,unsigned char memAdd,int byteCount,unsigned char* data);
+int  eeprom_Write(int slaveAdd,unsigned char memAdd,int byteCount,unsigned char* data);
+int  eeprom_Read(int slaveAdd, unsigned char memAdd, int byteCount,unsigned char* data);
+int  RTC_Read(int slaveAdd, unsigned char memAdd, int byteCount,unsigned char* data);
+void readStoreAndPrint(void);
+void BCDtoHex(unsigned char data[]);
+char* monthOfyear(int month);
+void delayMicro(int ms);
+
+/*Configures the pins P4.0 and
+ *P6.1 for UCB1.
+ *@Param:void
+ *@Return:void
+ */
+void pins_Init(void){
+
+  PORT->SEL0 |= EESCL;       //CSL Line
+  PORT->SEL1 &= ~EESCL;
+  PORT->SEL0 |= EESDA;       //SDA Line
+  PORT->SEL1 &= ~EESDA;
+
+  SysTick -> CTRL = 0;            //Disable systick during step
+  SysTick -> LOAD = 0x00FFFFFF;   //max reload value
+  SysTick -> VAL = 0;             //clears it
+  SysTick -> CTRL = 0x00000005;   //enables systick 3MHz no interrupts
+}
+
+/*Buttons Init - White and Black buttons on Breadboard
+ *Connected to P5.4 and P5.5
+ *@Param: void
+ *@Return:void
+ */
+void button_Init(void){
+
+  BUTBLK->SEL0 &= ~BLACK;   //Black Button.
+  BUTBLK->SEL1 &= ~BLACK;   //BIT4 .
+  BUTBLK->DIR  &= ~BLACK;
+  BUTBLK->REN  |=  BLACK;   //enabling pull up resistors
+  BUTBLK->OUT  |=  BLACK;
+  BUTBLK->IES  |=  BLACK;   //high to low trigger
+  BUTBLK->IE   |=  BLACK;   //enabling interrupts
+  BUTBLK->IFG  =   0;       //clear flag
+
+  BUTWIT->SEL0 &= ~WHITE;   //Black and White buttons setup.
+  BUTWIT->SEL1 &= ~WHITE;   //BIT4 - Black Button - BIT5--White button.
+  BUTWIT->DIR  &= ~WHITE;   //setting bits 4 and 5 as inputs
+  BUTWIT->REN  |=  WHITE;   //enabling pull up resistors
+  BUTWIT->OUT  |=  WHITE;
+  BUTWIT->IES  |=  WHITE;   //high to low trigger
+  BUTWIT->IE   |=  WHITE;   //enabling interrupts
+  BUTWIT->IFG   =  0;       //clear flag
+
+  NVIC_EnableIRQ(PORT5_IRQn);       //Interrupt enable in NIVC
+  NVIC_SetPriority(PORT5_IRQn, 1);
+
+  NVIC_EnableIRQ(PORT4_IRQn);      //Interrupt enable in the NVIC
+  NVIC_SetPriority(PORT4_IRQn, 1);
+  _enable_IRQ();
+}
+
+/*Initialization and configuration of UCB1
+ *For  TX/RX of the signal.
+ */
+void eeprom_I2C_Init(void){
+
+    EUSCI_B1->CTLW0 |= 1;        //Disable UCB1 during config.
+    EUSCI_B1->CTLW0  = 0x0F81;   //7 Bit-Slave ADDR, Master, I2C Synch Mode, SMCLK.
+    EUSCI_B1->BRW    = 0x18;      //CLK Prescaler 3MHz, 30=100KHz
+    EUSCI_B1->CTLW0 &= ~1;       //enable UCB1 after Config.
+}
+
+/*Ganselle Deobunce Function professor provided for Button connected
+ *to P5.5 - Black button on the breadbaord - stores data to the EEPROM chip
+ *@Param: void
+ *@Return:void
+ */
+uint8_t DebounceSwitch1(){
+ static uint16_t State = 0;
+ State=(State<<1) | (BUTWIT->IN & 0x1) | 0xf800;
+ if(State==0xfc00)return 1;
+
+ return 0;
+}
+
+/*Ganselle Deobunce Function professor provided for Button connected
+ *to P5.4 - White Button on the breadboard - Displays data to the screen
+ *@Param: void
+ *@Return:void
+ */
+uint8_t DebounceSwitch2(){
+ static uint16_t State = 0;
+ State=(State<<1) | (BUTBLK->IN & 0x1) | 0xf800;
+ if(State==0xfc00)return 1;
+
+ return 0;
+}
+
+/*Port 5 IRQ Handler
+ *@Param:  void
+ *@Return: void
+ */
+void PORT5_IRQHandler(){
+
+    if(BUTWIT->IFG & WHITE){
+        BUTWIT->IE &= ~WHITE;
+        BUTWIT->IFG = 0;
+        buttonOneFlag = 1;
+    }
+    BUTWIT->IFG = 0;
+}
+
+/*Port 4 IRQ Handler
+ *@Param:  void
+ *@Return: void
+ */
+void PORT4_IRQHandler(){
+
+    if(BUTBLK->IFG & BLACK){
+        BUTBLK->IE &= ~BLACK;
+        BUTBLK->IFG = 0;
+        buttonTwoFlag = 1;
+    }
+    BUTBLK->IFG = 0;
+}
+
+/*Use of burst write to write data to consecutive
+ *memory locations.
+ *@Return: int
+ *@Param: int,unsigned char,int, unsigned char*
+ */
+int RTC_Write(int slaveAdd,unsigned char memAdd,int byteCount,unsigned char* data){
+    if(byteCount <= 0)
+        return -1;
+
+        EUSCI_B1->I2CSA  = slaveAdd;      //Setup slave address.
+        EUSCI_B1->CTLW0 |= 0x0010;        //Enable transmitter.
+        EUSCI_B1->CTLW0 |= 0x0002;        //Generate START and send slave address.
+        while(!(EUSCI_B1->IFG & 2)){}      //Delay till the ready for transmission.
+        EUSCI_B1->TXBUF = memAdd;         //Tx memory address to slave device - DS1337.
+
+        do{
+            while(!(EUSCI_B1->IFG & 2)){} //Time delay untill ready to transmit.
+            EUSCI_B1->TXBUF = *data++;    //Sends data to DS1337.
+            byteCount--;
+        }while(byteCount >0);
+
+        while(!( EUSCI_B1->IFG & 2)){}      //Delay till last transmission is successful
+        EUSCI_B1->CTLW0 |= 0x0004;         //Sends the stop bit.
+        while(EUSCI_B1->CTLW0 & 4){}        //Delay till STOP bit sent.
+
+        return 0;
+}
+
+/*Use of burst write to write data to consecutive
+ *memory locations.
+ *@Return: int
+ *@Param: int,unsigned char,int, unsigned char*
+ */
+int eeprom_Write(int slaveAdd,unsigned char memAdd,int byteCount,unsigned char* data){
+
+    if(byteCount <= 0){return -1;}  //No write was performed
+
+
+    EUSCI_B1->I2CSA = slaveAdd;    //Setup Slave Addr
+    EUSCI_B1->CTLW0 |= 0x0010;      //enable transmitter
+    EUSCI_B1->CTLW0 |= 0x0002;      //generate START and send slave addr
+    while(!(EUSCI_B1->IFG & 2));    //wait until ready to transmit
+    EUSCI_B1->TXBUF = memAdd;// & 0xFF00)>> 8;      //send memory address to slave most significant bit.
+
+    while(!(EUSCI_B1->IFG & 2));          //Wait till it's ready for next transmission.
+    EUSCI_B1->TXBUF  = memAdd; //& 0x00FF;   //Send memory address to slave LSB.
+
+    while(!(EUSCI_B1->IFG & 2));        //Wait till it's ready for next transmission.
+
+    do {                                //send data one byte at a time
+        while(!(EUSCI_B1->IFG & 2));    //wait until ready to transmit
+        EUSCI_B1->TXBUF = *data++;      //send data to slave
+        byteCount--;
+    } while(byteCount > 0);
+
+    while(!(EUSCI_B1->IFG & 2));    //wait until last transmit is done
+    EUSCI_B1->CTLW0 |= 0x0004;      //send STOP
+    while(EUSCI_B1->CTLW0 & 4);     //wait until stop is sent
+    delayMicro(200);
+    return 0;                       //no error
+}
+
+/*Use of burst read to read from the 24C02C from consecutive locations
+ *read: S-(SlaveADD+W) - ACK-memADD-(slaveAdd)-ACK-data-ACK...-data-NACK-P
+ *@Param:int,unsigned char,int, unsigned char*
+ *@Return: int
+ */
+int eeprom_Read(int slaveAdd, unsigned char memAdd, int byteCount,unsigned char* data){
+
+    if (byteCount <= 0)
+        return -1;      //no read was performed
+
+    EUSCI_B1->I2CSA = slaveAdd;            //setup slave addr
+    EUSCI_B1->CTLW0 |= 0x0010;             //enable transmitter
+    EUSCI_B1->CTLW0 |= 0x0002;             //generate START and send slave addr
+
+    while (EUSCI_B1->CTLW0 & 2);            //wait until ready to transmit
+    EUSCI_B1->TXBUF = (memAdd & 0x7F00)>>8; //Send memory address to slave MSB.
+
+    while (!(EUSCI_B1->IFG & 2));           //wait until last transmit is complete
+    EUSCI_B2->TXBUF  = memAdd & 0x00FF;    //Send memory address to slave LSB.
+
+    while(!(EUSCI_B1->IFG & 2));
+
+    EUSCI_B1->CTLW0 &= ~0x0010;             //enable receiver
+    EUSCI_B1->CTLW0 |= 0x0002;              //generate RESTART and send slave address
+    while (!(EUSCI_B1->IFG & 2));           //wait until RESTART is finished
+
+    do {                                    //receive data one byte at a time
+        if(byteCount == 1){                 //only when 1 byte data is left
+            EUSCI_B1->CTLW0 |= 0x0004;      //setup to send stop after last byte is received
+        }
+        while(!(EUSCI_B1->IFG & 1));        //wait until data is received
+        *data++ = EUSCI_B1->RXBUF;           //read received data
+        byteCount--;
+    } while(byteCount);
+
+    while(EUSCI_B1->CTLW0 & 4);             //wait until stop bit is sent
+    delayMicro(200);
+    return 0;                                //no error.
+
+}
+
+/*Use of burst read to read from the 24C02C from consecutive locations
+ *read: S-(SlaveADD+W) - ACK-memADD-(slaveAdd)-ACK-data-ACK...-data-NACK-P
+ *@Param:int,unsigned char,int, unsigned char*
+ *@Return: int
+ */
+int RTC_Read(int slaveAdd, unsigned char memAdd, int byteCount,unsigned char* data){
+
+    if(byteCount <= 0)
+        return -1;
+
+    EUSCI_B1->I2CSA  = slaveAdd;      //Setup slave address.
+    EUSCI_B1->CTLW0 |= 0x0010;        //Enable transmitter.
+    EUSCI_B1->CTLW0 |= 0x0002;        //Generate START and send slave address.
+
+    while(EUSCI_B1->CTLW0 & 2){}      //Wait till transmission is complete.
+    EUSCI_B1->TXBUF  = memAdd;        //Send memory address to DS1337.
+    while(!(EUSCI_B1->IFG & 2)){}       //Wait till last transmit is complete.
+    EUSCI_B1->CTLW0 &= ~0x0010;       //Enable receiver.
+    EUSCI_B1->CTLW0 |= 0x0002;        //generate RESTART and send slave address.
+    while(!(EUSCI_B1->IFG & 2)){}       //Wait till RESTART is complete.
+
+    do{
+        if(byteCount==1)                 //When only one byte of data is left.
+            EUSCI_B1->CTLW0 |= 0x0004;   //Setup to send STOP after the last bit is received.
+        while(!(EUSCI_B1->IFG & 1)){}     //Wait till data is received.
+        *data++ = EUSCI_B1->RXBUF;       //Read the received data.
+        byteCount--;
+    }while(byteCount);
+
+    while(EUSCI_B1->CTLW0 & 4){}         //Wait till STOP is sent.
+    return 0;                         //no error.
+}
+
+/*Program Reads data from the RTC, Stores to the EEPROM chip and prints to the CCS console
+ *with the aid of a Finite State Machine.
+ *@Param: void
+ *@Return:void
+ */
+void readStoreAndPrint(){
+
+ switch(current){
+     case timeOne:
+         if(buttonOneFlag && DebounceSwitch1()){
+
+             RTC_Read(RTC_ADD,0,18,DataRX_RTC);      //Reads from the Real Time Clock
+
+             printf("\nSaving to Mem Location: #1\n");
+             delayMicro(200);
+             BCDtoHex(DataRX_RTC);                      //Prints to user on data to be saved
+             delayMicro(200);
+
+             eeprom_Write(EEPROM_ADD,0x01,6,DataTX_EE);   //Saves to the real time clock.
+             buttonOneFlag=0;                           //Resets the interrupt flag
+             BUTWIT->IE |= WHITE;                       //re-enabling interrupts
+             current=timeTwo;
+           }
+
+         if(buttonTwoFlag && DebounceSwitch2()){        //Reading from the EEPROM
+
+             delayMicro(200);
+             eeprom_Read(EEPROM_ADD,0x01,6,DataRX_EE);
+
+             printf("\nReading from Mem Location: #1\n");
+             printf("Date: %s %02u\n",monthOfyear(DataRX_EE[2]),DataRX_EE[1]);
+             printf("Time: %02u:%02u:%02u\n\n",DataRX_EE[3],DataRX_EE[5],DataRX_EE[4]);
+             buttonTwoFlag=0;
+             BUTBLK->IE |= BLACK;
+             current=timeTwo;
+           }
+
+         break;
+     case timeTwo:
+         if(buttonOneFlag && DebounceSwitch1()){
+
+             RTC_Read(RTC_ADD,0,18,DataRX_RTC);      //Reads from the Real Time Cloxk
+             printf("\nSaving to Mem Location: #2\n");
+
+             BCDtoHex(DataRX_RTC);                      //Prints to user on data to be saved
+             delayMicro(200);
+             eeprom_Write(EEPROM_ADD,0x02,5,DataTX_EE);   //Saves to the real time clock.
+             buttonOneFlag=0;
+             BUTWIT->IE |= WHITE;                       //re-enabling interrupts
+             current=timeThree;
+            }
+
+         if(buttonTwoFlag && DebounceSwitch2()){        //Reading from the EEPROM chip.
+
+             delayMicro(200);
+             eeprom_Read(EEPROM_ADD,0x02,5,DataRX_EE);
+
+             printf("\nReading from Mem Location: #2\n");
+             printf("Date: %s %02u\n",monthOfyear(DataRX_EE[2]),DataRX_EE[1]);
+             printf("Time: %02u:%02u:%02u\n\n",DataRX_EE[3],DataRX_EE[5],DataRX_EE[4]);
+
+             buttonTwoFlag=0;
+             BUTBLK->IE |= BLACK;
+             current=timeThree;
+            }
+         break;
+     case timeThree:
+          if(buttonOneFlag && DebounceSwitch1()){
+
+             RTC_Read(RTC_ADD,0,18,DataRX_RTC);      //Reads from the Real Time Cloxk
+             printf("\nSaving to Mem Location: #3\n");
+
+             BCDtoHex(DataRX_RTC);                      //Prints to user on data to be saved
+             delayMicro(200);
+             eeprom_Write(EEPROM_ADD,0x03,5,DataTX_EE);   //Saves to the real time clock.
+             buttonOneFlag=0;
+             BUTWIT->IE |= WHITE;                       //re-enabling interrupts
+             current=timeFour;
+            }
+
+          if(buttonTwoFlag && DebounceSwitch2()){        //Reading from the EEPROM chip.
+
+             delayMicro(200);
+             eeprom_Read(EEPROM_ADD,0x03,5,DataRX_EE);
+
+             printf("\nReading from Mem Location: #3\n");
+             printf("Date: %s %02u\n",monthOfyear(DataRX_EE[2]),DataRX_EE[1]);
+             printf("Time: %02u:%02u:%02u\n\n",DataRX_EE[3],DataRX_EE[5],DataRX_EE[4]);
+
+             buttonTwoFlag=0;
+             BUTBLK->IE |= BLACK;
+             current=timeFour;
+            }
+         break;
+     case timeFour:
+          if(buttonOneFlag && DebounceSwitch1()){
+
+             RTC_Read(RTC_ADD,0,18,DataRX_RTC);      //Reads from the Real Time Clock
+             printf("\nSaving to Mem Location: #4\n");
+
+             BCDtoHex(DataRX_RTC);                      //Prints to user on data to be saved
+             delayMicro(200);
+             eeprom_Write(EEPROM_ADD,0x04,5,DataTX_EE);   //Saves to the real time clock.
+
+             buttonOneFlag=0;
+             BUTWIT->IE |= WHITE;                       //re-enabling interrupts
+             current=timeFive;
+           }
+
+          if(buttonTwoFlag && DebounceSwitch2()){        //Reading from the EEPROM chip.
+
+             delayMicro(200);
+             eeprom_Read(EEPROM_ADD,0x04,5,DataRX_EE);
+
+             printf("\nReading from Mem Location: #4\n");
+             printf("Date: %s %02u\n",monthOfyear(DataRX_EE[2]),DataRX_EE[1]);
+             printf("Time: %02u:%02u:%02u\n\n",DataRX_EE[3],DataRX_EE[5],DataRX_EE[4]);
+
+             buttonTwoFlag=0;
+             BUTBLK->IE |= BLACK;
+             current=timeFive;
+            }
+         break;
+     case timeFive:
+          if(buttonOneFlag && DebounceSwitch1()){
+
+            RTC_Read(RTC_ADD,0,16,DataRX_RTC);      //Reads from the Real Time Cloxk
+            printf("\nSaving to Mem Location: #5\n");
+
+            BCDtoHex(DataRX_RTC);                      //Prints to user on data to be saved
+            delayMicro(200);
+            eeprom_Write(EEPROM_ADD,0x05,16,DataTX_EE);   //Saves to the real time clock.
+
+            buttonOneFlag=0;
+            BUTWIT->IE |= WHITE;                       //re-enabling interrupts
+            current=timeOne;
+          }
+
+         if(buttonTwoFlag && DebounceSwitch2()){        //Reading from the EEPROM chip.
+
+            delayMicro(200);
+            eeprom_Read(EEPROM_ADD,0x05,5,DataRX_EE);
+
+            printf("\nReading from Mem Location: #5\n");
+            printf("Date: %s %02u\n",monthOfyear(DataRX_EE[2]),DataRX_EE[1]);
+            printf("Time: %02u:%02u:%02u\n\n",DataRX_EE[3],DataRX_EE[5],DataRX_EE[4]);
+
+            buttonTwoFlag=0;
+            BUTBLK->IE |= BLACK;
+            current=timeOne;
+           }
+         break;
+     default:
+         printf("Not a valid option!\n");
+    }
+}
+
+/*Converts data recieved from the RTC from BCD to Hex for display
+ *and storage to the EEPROM external chip
+ *@Param: void
+ *@Return: void
+ */
+void BCDtoHex(unsigned char data[]){
+
+    int shift=4;
+
+    readMon=(data[5]>>shift)*10+ (data[5]& 0x0F);  //BCD to decimal conversion - Hours
+    DataTX_EE[0]=readMon;
+    day=(data[3]>>shift)*10+(data[3]&0x0F);         //Day
+    DataTX_EE[1]=day;
+    readHour=(data[2]>>shift)*10+(data[2]&0x0F);  //Hours.
+    DataTX_EE[2]=readHour;
+    readSec=(data[0]>>shift)*10+(data[0]& 0x0F);  //Seconds from the RTC
+    DataTX_EE[3]=readSec;
+    readMins=(data[1]>>shift)*10+(data[1]&0x0F);  //Minutes.
+    DataTX_EE[4]=readMins;
+
+    //Displays the results to the screen.
+    printf("Date: %s %02u\n",monthOfyear(day),readMon);
+    printf("Time: %02u:%02u:%02u\n\n",readHour,readMins,readSec);
+}
+
+/*Selects day of the Month
+  *@Return: char*
+  *@Param: unsigned char
+  */
+ char* monthOfyear(int month){
+
+     if(month==1){
+         return "January";
+     }else if(month==2){
+         return "February";
+     }else if(month==3){
+         return "March";
+     }else if(month==4){
+         return "April";
+     }else if(month==5){
+         return "May";
+     }else if(month==6){
+         return "June";
+     }else if(month==7){
+         return "July";
+     }else if(month==8){
+         return "August";
+     }else if(month==9){
+         return "September";
+     }else if(month==10){
+         return "October";
+     }else if(month==11){
+         return "November";
+     }else if(month==12){
+         return "December";
+     }else{
+         return "Error!";
+     }
+ }
+
+/*System clock of adapted at 3MHz
+ *@Param: int
+ *@Return:void
+ */
+void delayMicro(int ms){
+    SysTick->LOAD = (3*ms)-1;
+    SysTick->VAL = 0;
+    while((SysTick->CTRL & 0x10000)==0){}
+}
+
+/*Main Function - Function Execution
+ *@Param: void
+ *@Return:void
+ */
+    void main(void){
+
+	WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD;		// stop watchdog timer.
+
+	eeprom_I2C_Init();
+	pins_Init();
+	button_Init();
+	RTC_Write(RTC_ADD,0,5,RTC_Set);
+
+    printf("\nLab 11: Storing data to an external EEPROM chip via I2C.\n");
+    printf("Press button number one to start.\n");
+
+
+	while(1){
+	     readStoreAndPrint();
+	  }
+}
