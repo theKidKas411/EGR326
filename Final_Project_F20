@@ -1,0 +1,1398 @@
+/*******************************************************
+ Title:        EGR 326 Final Project
+ Filename:     Final Project.c, ST7735.h, ST7735.c
+ Author(s):    Kasonde Musonda
+ Date:         12/11/2020
+ Instructor:   Professor: Dr.Krug
+
+ Description:  Final Project for the EGR326 - Fall 2020
+ Note:         Design of a dashboard of a motor vehicle
+********************************************************
+WIRING FOR MSP432
+
+Full Color LCD: SCK - P9.5 | SDA - P9.7 | LED - 3.3V |
+                A0 - P9.2  | RST - P9.3 |
+                VCC - 3.3V | GND - GND  | CS  - P9.4 |
+
+HC-SRO4 SENSOR: VCC - 5V   | ECHO - P2.4| TRIG - P2.5|
+                GRND - GRND|
+
+Photo Resistor: PR - P5.5   | LCD_LED P5.6|
+                LEDPIN- P2.7| GRND - GRND |
+
+*******************************************************/
+#include "msp.h"
+#include "ST7735.h"
+#include "image.h"
+#include "string.h"
+#include "stdio.h"
+
+#define EEPROM_ADD 0x50  //Address of EEPROM CHIP - on common I2C line.
+#define RTC_ADD  0x68    //Address of DS3231
+#define I2CPORT  P6
+#define I2CSCL   BIT5    //Serial Clock Line
+#define I2CSDA   BIT4    //Serial Data  Line
+#define SENPORT  P2      //Port 2 of MSP432 Launchpad
+#define TRIG     BIT6    //P2.5 - Trigger Pin of Ultrasonic Sensor
+#define ECHO     BIT4    //P2.4 - Echo Pin of the UltraSonic sensor
+#define TIMEBUTT P5      //white Button on the breadbaord
+#define TIMEPIN  BIT0    //White Pin
+#define LED      P5      //Port 5 of the MSP432
+#define RED      BIT6    //Sixth bit of P5
+#define WATCHBUT P4      //Black button for watch dog timer.
+#define WTCHPIN  BIT0    //White Pin
+#define MPORT    P10     //Motor pins Macro Declaration.
+#define IN1      BIT0
+#define IN2      BIT1
+#define IN3      BIT2
+#define IN4      BIT3
+#define HALL     P6     //Hall Effect Macro Declaration.
+#define HALLPIN  BIT6
+#define PHOTOPORT P5    //Photo Resistor Port.
+#define PHOTOPIN  BIT5
+#define LCDLED    P2    //PMW - Port for LCD Ambience.
+#define LEDPIN    BIT7
+#define IN1PORT   P2    //Define Macros - for All white motor
+#define IN1PIN    BIT3
+#define IN2PORT   P5
+#define IN2PIN    BIT1
+#define IN3PORT   P3
+#define IN3PIN    BIT5
+#define IN4PORT   P3
+#define IN4PIN    BIT7
+#define CSPORT    P5      //Definition of Macros.
+#define CSPIN     BIT2
+#define DINPORT   P1
+#define DINPIN    BIT6
+#define CLKPORT   P1
+#define CLKPIN    BIT5
+
+#define DECODE          0x09
+#define DECODE_MODE     0xFF     //decode setting
+#define INTENSITY       0x0A     //intensity address
+#define INTENSITY_MODE  0x03     //intensity setting
+#define SCAN_LIMIT      0x0B     //scan address
+#define SCAN_LIMIT_MODE 0x07     //scan setting
+#define SHUTDOWN        0x0C     //shutdown address
+#define SHUTDOWN_MODE   0x01     //shutdown setting normal operation
+#define DIS_TEST        0x0F     //display address
+#define DIS_TEST_MODE   0x01     //test mode setting
+
+#define DIGIT_0 0x01 //macro for digit addresses
+#define DIGIT_1 0x02
+#define DIGIT_2 0x03
+#define DIGIT_3 0x04
+#define DIGIT_4 0x05
+#define DIGIT_5 0x06
+#define DIGIT_6 0x07
+#define DIGIT_7 0x08
+
+#define STEP1 1         //Steps For the Motor Function - Motor with blue trim.
+#define STEP2 2
+#define STEP3 3
+#define STEP4 4
+#define ALARM 85        //Excursion exercusion
+
+/**StateMcahine for Program Run**/
+enum states{park,drive,reverse,stop,stopTwo};
+enum states current =park;
+
+/**Global Variables**/
+//UltraSonic sensor variables.
+float   t_rise=0;
+float   pwm=0;
+uint8_t time=0;
+float   Inches;
+char    InchesD[1];
+
+/**RTC_Global_Variables**/
+unsigned char DataRX_RTC[30];       //Data retrieved from the Real Time Clock
+unsigned char RTC_Set[19] = {0x30,0x30,0x09,0,0x03,0x0B};    //09:30:30 11/03
+unsigned char DataTX_EE[30];        //Data to be sent to the EEPROM
+unsigned char DataRX_EE[30];        //Data from the EEPROM
+
+char readMonD[1]={0};  //Month from the RTC module.
+char readDateD[2];     //Date from the RTC module.
+char readYearD[2];     //Year from the RTC module.
+char readSecD[2];      //Seconds from the RTC module.
+char readMinsD[2];     //Mins from the RTC module.
+char readHourD[2];     //Hours from the RTC module.
+uint8_t timeFlag=0;    //Time flag when button is pressed to report time.
+
+/**Motor Variables**/
+volatile int interrupt_flag=0;
+//uint8_t buttonCount=0;
+int count = 0;             //Count variable for PulseWidth Modulation Calculations.
+int pmw =0;                //Pulse Widith Modulation for Stepper motor
+int speed=0;               //Speed of stepper motor
+int rpm=0;                 //Ravs per Minute of stepper motor
+int display=0;             //Display flag
+char speedD[1];            //Arrays for displaying Speed and RPM
+char rpmD[1];
+volatile int doorOpen = 0;
+volatile int doorClosed =0;
+
+/**Function Prototypes**/
+void init(void);
+void timerA_init(void);
+void I2C_Init(void);
+void SPI_Init();
+void Clock_Init48MHz(void);
+void PMW_LCD_LED(void);
+void display_Init(uint8_t intstruction, uint8_t data);
+void step(int steps, int direction);
+void TA0_N_IRQHandler(void);
+void TA2_N_IRQHandler(void);
+void PORT5_IRQHandler(void);
+uint8_t DebounceSwitch1(void);
+void BCDtoHex(unsigned char data[]);
+void printFunction(void);
+void printExecursion(void);
+void RTC_TimetoChar(void);
+void delay_Milli(int milli);
+void delay_Micro(int micro);
+char* dayOfTheWeek(int day);
+void ultraSonicFunction(void);
+void motorFunction(void);
+void backwards(char s[]);
+void toString(int n, char s[]);
+char* monthOfyear(int month);
+int eeprom_Read(int slaveAdd, unsigned char memAdd, int byteCount,unsigned char* data);
+int eeprom_Write(int slaveAdd,unsigned char memAdd,int byteCount,unsigned char* data);
+int  RTC_Read(int slaveAdd, unsigned char memAdd, int byteCount,unsigned char* data);
+int  RTC_Write(int slaveAdd,unsigned char memAdd,int byteCount,unsigned char* data);
+void stateCanvas(void);
+void ambientLight(void);
+
+/*Configures the pins P6.4 and P6.4
+ *for UCB1/Confgiures UltraSonic sensor
+ *RED LED light and I2C Bus connected to ports
+ *P2.5/P2.6 and P5.6
+ *IN1 -> P10.0
+ *IN2 -> P10.1
+ *IN3 -> P10.2
+ *IN4 -> P10.3
+ *@Param:void
+ *@Return:void
+ */
+void init(){
+
+  //UltraSonic Sensor Port
+  //Pin register configuration
+  SENPORT->SEL0 &= ~(TRIG); //Sets P2.4 pin as GPIO-Trigger Pin.
+  SENPORT->SEL1 &= ~(TRIG);
+  SENPORT->DIR  |=  (TRIG);
+  SENPORT->OUT  |=  (TRIG);
+  SENPORT->OUT  &= ~(TRIG);
+
+  SENPORT->SEL0 |=  (ECHO); //TA0.CC12A TA0.2 on P2.5.
+  SENPORT->SEL1 &= ~(ECHO);
+  SENPORT->OUT  &= ~(ECHO);
+
+  LED->SEL0 |=  RED;        //TA2.1 on RED LED light.
+  LED->SEL1 &= ~RED;
+  LED->DIR  |=  RED;
+  LED->OUT  &= ~RED;
+
+  I2CPORT->SEL0 |=  I2CSCL;       //I2C Bus/SCL/SDA
+  I2CPORT->SEL1 &= ~I2CSCL;
+  I2CPORT->SEL0 |=  I2CSDA;
+  I2CPORT->SEL1 &= ~I2CSDA;
+
+  //Motor as Plain GPIO.
+  MPORT->SEL0 &= ~(IN1 | IN2 | IN3 | IN4); //Motor function pins as GPIO.
+  MPORT->SEL1 &= ~(IN1 | IN2 | IN3 | IN4);
+  MPORT->DIR  |=  (IN1 | IN2 | IN3 | IN4);
+  MPORT->OUT  &=  (IN1 | IN2 | IN3 | IN4);
+
+  IN1PORT->SEL0 &= ~(IN1PIN);    //setting up In1 for white motor
+  IN1PORT->SEL1 &= ~(IN1PIN);
+  IN1PORT->DIR  |=  (IN1PIN);
+  IN1PORT->OUT  |=  (IN1PIN);
+
+  IN2PORT->SEL0 &= ~(IN2PIN);    //setting up In2 for white motor
+  IN2PORT->SEL1 &= ~(IN2PIN);
+  IN2PORT->DIR  |=  (IN2PIN);
+  IN2PORT->OUT  |=  (IN2PIN);
+
+  IN3PORT->SEL0 &= ~(IN3PIN);    //setting up In3 for white motor
+  IN3PORT->SEL1 &= ~(IN3PIN);
+  IN3PORT->DIR  |=  (IN3PIN);
+  IN3PORT->OUT  |=  (IN3PIN);
+
+  IN4PORT->SEL0 &= ~(IN4PIN);    //setting up In4 for white motor
+  IN4PORT->SEL1 &= ~(IN4PIN);
+  IN4PORT->DIR  |=  (IN4PIN);
+  IN4PORT->OUT  |=  (IN4PIN);
+
+  //Hall Port Secondary function for Timer A.
+  HALL->SEL0 |=  (HALLPIN);        //TA2.CCI2A secondary function for data capture from sensor
+  HALL->SEL1 &= ~(HALLPIN);       //TA2.CCI2A Secondary function for data capture from sensor
+  HALL->DIR  &= ~(HALLPIN);
+
+  TIMER_A2->CTL   |=  0b0000000111100010;
+  TIMER_A2->CCTL[3] = 0b0100100100010000;
+
+  TIMEBUTT->SEL0 &= ~TIMEPIN;   //Black and White buttons setup.
+  TIMEBUTT->SEL1 &= ~TIMEPIN;   //BIT4 - Black Button - BIT5--White button.
+  TIMEBUTT->DIR  &= ~TIMEPIN;   //setting bits 4 and 5 as inputs
+  TIMEBUTT->REN  |=  TIMEPIN;   //enabling pull up resistors
+  TIMEBUTT->OUT  |=  TIMEPIN;
+  TIMEBUTT->IES  |=  TIMEPIN;   //high to low trigger
+  TIMEBUTT->IE   |=  TIMEPIN;   //enabling interrupts
+  TIMEBUTT->IFG   =  0;         //clear flag
+
+  WATCHBUT->SEL0 &= ~WTCHPIN;   //Black Button.
+  WATCHBUT->SEL1 &= ~WTCHPIN;   //BIT4 .
+  WATCHBUT->DIR  &= ~WTCHPIN;
+  WATCHBUT->REN  |=  WTCHPIN;   //enabling pull up resistors
+  WATCHBUT->OUT  |=  WTCHPIN;
+  WATCHBUT->IES  |=  WTCHPIN;   //high to low trigger
+  WATCHBUT->IE   |=  WTCHPIN;   //enabling interrupts
+  WATCHBUT->IFG  =   0;       //clear flag
+
+  PHOTOPORT->SEL0 |= PHOTOPIN; //Photo resistor initialization
+  PHOTOPORT->SEL1 |= PHOTOPIN;
+
+  LCDLED->SEL0 |=  LEDPIN;    //LED Port and Pin initialization - Timer_A0 connected to P2.7
+  LCDLED->SEL1 &= ~LEDPIN;
+  LCDLED->DIR  |=  LEDPIN;    //setting bits 0 as outputs
+  LCDLED->OUT  &= ~LEDPIN;    //starting the bit as low
+
+  ADC14->CTL0 &= ~0x00000002;  //Disable ADC14ENC during config.
+  ADC14->CTL0 |=  0x04200210;  //S/H Pulse Mode, SMCLK, 16 Sample clocks
+  ADC14->CTL1  =  0x00000030;  //14 bit resolution
+  ADC14->CTL1  =  0x00000000;  //Selecting ADC14CSTARTADDx mem0 REGISTER
+  ADC14->MCTL[0]= 0X00000000;  //ADC14INCHx=0 for mem[0]
+  ADC14->MCTL[0]=ADC14_MCTLN_INCH_0;
+  ADC14->CTL0 |=  0x00000002;  //Enable ADC14ENC, start the ADC after Confinguration.
+
+  NVIC->ISER[1] = 1 << ((PORT4_IRQn) & 31);
+  NVIC->ISER[1] = 1 << ((PORT5_IRQn) & 31);
+  NVIC->ISER[0] = 1 << ((TA2_N_IRQn) & 31); // Enable interrupt in NVIC vector
+  NVIC_SetPriority(PORT4_IRQn, 1);
+  NVIC_SetPriority(PORT5_IRQn, 2);
+  __enable_interrupt();
+}
+
+/*Timer A- Setup Function
+ *Sets up Timer A in Compare/Capture mode with
+ *With clock source as SMCLK in UpMode
+ *@Param: Void
+ *@return: void
+ */
+void timerA_init(){
+
+    __disable_irq();
+
+    TIMER_A0->CTL |=TIMER_A_CTL_TASSEL_2 | // Use SMCLK as clock source,
+                    TIMER_A_CTL_MC_2   | // Start timer in UP mode
+                    TIMER_A_CTL_CLR;       // clear TA0R
+
+    TIMER_A0->CCTL[1] =TIMER_A_CCTLN_CM_3    | // Capture rising and falling edge,
+                       TIMER_A_CCTLN_CCIS_0  | // Use CCI2A
+                       TIMER_A_CCTLN_CCIE    | // Enable capture interrupt
+                       TIMER_A_CCTLN_CAP     | // Enable capture mode,
+                       TIMER_A_CCTLN_SCS;      // Synchronous capture
+
+    TIMER_A2->CCR[0]= 1000-1;                   //PWM period for LED
+    TIMER_A2->CCTL[1] = TIMER_A_CCTLN_OUTMOD_7; // CCR1 reset/set
+    TIMER_A2->CCR[1] = 750;                     // CCR1 PWM duty cycle
+    TIMER_A2->CTL = TIMER_A_CTL_SSEL__SMCLK |
+                    TIMER_A_CTL_MC__UP |
+                    TIMER_A_CTL_CLR;            //TIMER_A2 =->  SMCK, Up Mode, Clear TAR
+
+    SysTick -> CTRL = 0;//disable systick during setup
+    SysTick -> LOAD = 0x00FFFFFF;//max reload value
+    SysTick -> VAL = 0;//clears it
+    SysTick -> CTRL = 0x00000005;//enables systick 3MHz no interrupts
+
+    NVIC_SetPriority(TA0_N_IRQn,1);
+    NVIC_EnableIRQ(TA0_N_IRQn);
+
+    __enable_irq();     //Enable global interrupt.
+}
+
+/*Initialization and configuration of UCB1
+ *For  TX/RX of the signal.
+ */
+void I2C_Init(void){
+
+    EUSCI_B1->CTLW0 |= 1;        //Disable UCB1 during config.
+    EUSCI_B1->CTLW0  = 0x0F81;   //7 Bit-Slave ADDR, Master, I2C Synch Mode, SMCLK.
+    EUSCI_B1->BRW    = 0x18;      //CLK Prescaler 3MHz, 30=100KHz
+    EUSCI_B1->CTLW0 &= ~1;       //enable UCB1 after Config.
+}
+
+/*Sets the pins the P2.Bit5, bit4 and bits for SPI
+ *Transmission.
+ *@Param: Void
+ *@Return:Void
+ */
+void SPI_Init(){
+
+   CSPORT->SEL0 &= ~CSPIN;       //CS Pin for the Seven Segment toggle.
+   CSPORT->SEL1 &= ~CSPIN;
+   CSPORT->DIR  |=  CSPIN;
+   CSPORT->REN  |=  CSPIN;
+   CSPORT->OUT  |=  CSPIN;
+
+   DINPORT -> SEL0 |= DINPIN;     //Data Transmission pin for SPI.
+   CLKPORT -> SEL0 |= CLKPIN;
+
+   EUSCI_B0 -> CTLW0 |= EUSCI_B_CTLW0_SWRST;         //Hold EUSCI_B0 module in reset state
+   EUSCI_B0 -> CTLW0 |= EUSCI_B_CTLW0_MST
+                                        | EUSCI_B_CTLW0_SYNC
+                                        | EUSCI_B_CTLW0_CKPL
+                                        | EUSCI_B_CTLW0_MSB;
+   EUSCI_B0 -> CTLW0 |= EUSCI_B_CTLW0_UCSSEL_2;    //Select SMCLK as EUSCI_B0 clock
+   EUSCI_B0 -> BRW = 0x0018;                       //Set BITCLK = BRCLK/ (UCBRx+1) = 3 MHz/24 = 128K
+   EUSCI_B0 -> CTLW0 &= ~EUSCI_B_CTLW0_SWRST;      //Resumes program run.
+
+   //Seven Segment Display Initialization.
+  display_Init(DECODE, DECODE_MODE);       //Steps as described by Dr. Krug
+  display_Init(INTENSITY, INTENSITY_MODE);
+  display_Init(SCAN_LIMIT, SCAN_LIMIT_MODE);
+  display_Init(SHUTDOWN, SHUTDOWN_MODE);   //Normal Operation Mode
+}
+
+/*Configures the Flash Wait-State,HFXT to use 48MHz - Provided.
+ *Crystal source to MCLK and HSMCLK
+ *@Param: void
+ *@Return: void
+ */
+void Clock_Init48MHz(void){
+
+  // Configure Flash wait-state to 1 for both banks 0 & 1
+   FLCTL->BANK0_RDCTL = (FLCTL->BANK0_RDCTL & ~(FLCTL_BANK0_RDCTL_WAIT_MASK)) |
+   FLCTL_BANK0_RDCTL_WAIT_1;
+   FLCTL->BANK1_RDCTL = (FLCTL->BANK0_RDCTL & ~(FLCTL_BANK0_RDCTL_WAIT_MASK)) |
+   FLCTL_BANK1_RDCTL_WAIT_1;
+
+  //Configure HFXT to use 48MHz crystal, source to MCLK & HSMCLK*
+   PJ->SEL0 |= BIT2 | BIT3;                     // Configure PJ.2/3 for HFXT function
+   PJ->SEL1 &= ~(BIT2 | BIT3);
+   CS->KEY = CS_KEY_VAL ;                       // Unlock CS module for register access
+   CS->CTL2 |= CS_CTL2_HFXT_EN | CS_CTL2_HFXTFREQ_6 | CS_CTL2_HFXTDRIVE;
+  while(CS->IFG & CS_IFG_HFXTIFG)
+                CS->CLRIFG |= CS_CLRIFG_CLR_HFXTIFG;
+
+ /* Select MCLK & HSMCLK = HFXT, no divider */
+  CS->CTL1 = CS->CTL1 & ~(CS_CTL1_SELM_MASK     |
+                          CS_CTL1_DIVM_MASK     |
+                          CS_CTL1_SELS_MASK     |
+                          CS_CTL1_DIVHS_MASK)   |
+                          CS_CTL1_SELM__HFXTCLK |
+                          CS_CTL1_SELS__HFXTCLK;
+
+  CS->CTL1 = CS->CTL1 |CS_CTL1_DIVS_2;    // change the SMCLK clock speed to 12 MHz.
+
+  CS->KEY = 0;                            // Lock CS module from unintended accesses
+}
+
+/*Pulse Width Modulation - connected to Timer_A0
+ *@Param: void
+ *@Return:void
+ */
+void PMW_LCD_LED(void){
+   TIMER_A0->CCR[0] = 50000;  //Period at a frequency ->60Hz Ambient Light
+   TIMER_A0->CCR[4] = 25000;    //Duty Cycle 100% 50000 25000 = 50%
+   TIMER_A0->CCTL[4]= 0xE0;     //CCR4 reset/set mode TIMER_A_CCTLN_OUTMODE_7
+   TIMER_A0->CTL    = 0x0214;   //SMCLK, count up, clear TAOR register
+}
+
+/*Initializes the 7 Seven Segment Display per the
+ *Instructions from Dr. Krug during Lab Session 7.
+ *@Param:  Void
+ *@Return: Void
+ */
+void display_Init(uint8_t instruction, uint8_t data){
+
+    CSPORT -> OUT &= ~CSPIN;
+    delay_Micro(100);
+    while(!( EUSCI_B0->IFG&2));
+    EUSCI_B0->TXBUF = instruction;
+    while(!( EUSCI_B0->IFG&2));
+    EUSCI_B0->TXBUF =data;
+    while(!( EUSCI_B0->IFG&2));
+    delay_Micro(100);
+    CSPORT -> OUT |= CSPIN;
+}
+
+/*Furnishes the step and direction for stepper
+ *motor
+ *@Param: int steps and int direction
+ *@Return:void
+ */
+void step(int steps, int direction){
+
+  int count = 0;
+  //Comment out for half step mode
+  steps = steps * 2;
+  enum stepper{stepOne,stepTwo,stepThree,stepFour};  //Enum types for StateMachine
+  enum stepper state = stepOne;
+
+  //this is the half step method
+  while(1){
+
+      if(steps <= 80000){
+        switch(state){
+           case stepOne:
+             if(count >= steps) break;
+                IN1PORT->OUT |=  (IN1PIN);
+                IN2PORT->OUT |=  (IN2PIN);
+                IN3PORT->OUT |=  (IN3PIN);
+                IN4PORT->OUT &= ~(IN4PIN);
+
+                __delay_cycles(200); //Time Delay.
+                count++;
+                if(direction == 0){ state = stepTwo; break;}
+                if(direction == 1){ state = stepFour; break;}
+
+             case stepTwo:
+
+                 if(count >= steps){break;}
+                 IN1PORT->OUT &= ~(IN1PIN);
+                 IN2PORT->OUT |=  (IN2PIN);
+                 IN3PORT->OUT |=  (IN3PIN);
+                 IN4PORT->OUT |=  (IN4PIN);
+
+                 __delay_cycles(200);  //Time Delay
+                count++;
+                if(direction == 0){ state = stepThree; break;}
+                if(direction == 1){ state = stepOne; break;}
+
+             case stepThree:
+
+                 if(count >= steps){break;}
+                 IN1PORT->OUT |=  (IN1PIN);
+                 IN2PORT->OUT &= ~(IN2PIN);
+                 IN3PORT->OUT |=  (IN3PIN);
+                 IN4PORT->OUT |=  (IN4PIN);
+
+                 __delay_cycles(200);
+                 count++;
+                 if(direction == 0){ state = stepFour; break;}
+                 if(direction == 1){ state = stepTwo; break;}
+
+             case stepFour:
+                 if(count >= steps){break;}
+                 if(count >= steps){break;}
+                 IN1PORT->OUT |=  (IN1PIN);
+                 IN2PORT->OUT |=  (IN2PIN);
+                 IN3PORT->OUT &= ~(IN3PIN);
+                 IN4PORT->OUT |=  (IN4PIN);
+
+                 __delay_cycles(200);
+                 count++;
+                 if(direction == 0){ state = stepOne; break;}
+                 if(direction == 1){ state = stepThree; break;}
+
+             default:
+                 if(count >= steps) break;
+                 state = stepOne;
+           }
+        }
+        else break;
+        if(count >= steps) break;
+    }
+}
+
+/*Delay in milliseconds using SysTick Timer.
+ *@Param: integer
+ *@Return:void
+ */
+void delay_Milli(int milli){
+    SysTick->LOAD =(3333*milli)-1;
+    SysTick->VAL = 0;
+    while((SysTick->CTRL & 0x10000)==0);
+}
+
+/*Delay in microseconds using SysTick Timer
+ *@Param: integer micro seconds
+ *@Return: void
+ */
+void delay_Micro(int micro){
+    SysTick->LOAD = (3*micro)-1;
+    SysTick->VAL = 0;
+    while((SysTick->CTRL & 0x10000)==0){}
+}
+
+/*Timer A - Interrupt Handler
+ *@Param: void
+ *@Return:void
+ */
+void TA0_N_IRQHandler(void){
+
+    t_rise=TIMER_A0->CCR[1];   //Get current time
+    if(SENPORT->IN & ECHO){
+        TIMER_A0->CTL|=TIMER_A_CTL_CLR;    //Records the time of capture.
+    }else{
+        pwm=t_rise;
+    }
+    TIMER_A0->CCTL[1] &= ~(TIMER_A_CCTLN_CCIFG); //Clears the interrupt flag.
+}
+
+/*Timer A2 interrupt Handler for Hall Effect Sensor
+ *@Param: void
+ *@Return:void
+ */
+void TA2_N_IRQHandler(void){
+
+if(TIMER_A2->CCTL[3] & (TIMER_A_CCTLN_CCIFG)){
+    if(count==1){
+        pmw = TIMER_A2->CCR[3]; // Get current count
+        count = 0;
+        display = 1;
+    }else{
+        TIMER_A2->CTL |= TIMER_A_CTL_CLR;
+        count = 1;
+        display = 1;
+        }
+    }
+    TIMER_A2->CCTL[3] &= ~(TIMER_A_CCTLN_CCIFG);    // Clear the interrupt flag
+}
+
+/*Port 5 IRQ Handler
+ *@Param:  void
+ *@Return: void
+ */
+void PORT5_IRQHandler(void){
+  if(TIMEBUTT->IFG & TIMEPIN){
+     TIMEBUTT->IE &= ~TIMEPIN;
+     timeFlag = 1;
+    }
+  TIMEBUTT->IFG = 0;
+}
+
+/*Port 4 IRQ Handler - Watchdog Timer Reset.
+ *@Param:  void
+ *@Return: void
+ */
+void PORT4_IRQHandler(){
+
+    if(WATCHBUT->IFG & WTCHPIN){
+        WDT_A->CTL = 0x5A24;        //ACLK as clock source,
+        CS->KEY = CS_KEY_VAL;       //Password render before division by 4 to amount to 4s.
+        CS->CTL1 |= CS_CTL1_DIVA_1; //Division by 4.
+    }
+    WATCHBUT->IFG = 0;
+}
+
+/*Ganselle Deobunce Function professor provided for Button connected
+ *to P5.0 - Black button on the breadbaord - Displays time to LCD upon
+ *depression
+ *@Param: void
+ *@Return:void
+ */
+uint8_t DebounceSwitch(void){
+    static uint16_t state = 0; // current state of the button
+
+    // Note: 0xf800 is the delay time
+    /*
+     * This line shifts the current value of state over by 1. It then bit wise or's
+     * the value of Oxf800 so that the first 5 bits are allow ones. This
+     * makes it so that the first 4 bits are not used. It will also
+     * bit wise or the value with the reading at P2.5 and shifted over so that
+     * the read value located at bit 0 in the variable state. Eventually, if the
+     * pushbutton keeps reading so, the pushbutton will be debounce when the 10
+     * right most bits are all 0.
+     */
+    state = (state << 1) | (TIMEBUTT->IN & 0x1 ) | 0xf800;
+    // Checks to see the 10 right most bits are 0, if so, then it is debounced
+    if (state == 0xfc00){
+        return 1;
+    }
+    return 0;
+}
+
+/*Ganselle Deobunce Function professor provided for Button connected
+ *to P4.0 - Black button on the breadbaord.
+ *@Param: void
+ *@Return:void
+ */
+uint8_t DebounceSwitch1(void){
+ static uint16_t State = 0;
+ State=(State<<1) | (WATCHBUT->IN & 0x1) | 0xf800;
+ if(State==0xfc00)return 1;
+
+ return 0;
+}
+/*Converts data recieved from the RTC from BCD to Hex for display
+ *and storage to the EEPROM external chip
+ *@Param: void
+ *@Return: void
+ */
+void BCDtoHex(unsigned char data[]){
+    int shift=4;
+
+    uint8_t readDate=(data[4]>>shift)*10+ (data[4]& 0x0F);  //BCD to decimal conversion - Date
+    uint8_t readMon=(data[5]>>shift)*10+ (data[5]& 0x0F);   //BCD to decimal conversion - Hours
+    uint8_t readHour=(data[2]>>shift)*10+(data[2]&0x0F);    //Hours.
+    uint8_t readSec=(data[0]>>shift)*10+(data[0]& 0x0F);    //Seconds from the RTC
+    uint8_t readMins=(data[1]>>shift)*10+(data[1]&0x0F);    //Minutes.
+
+    DataTX_EE[0]=readSec;
+    DataTX_EE[1]=readMins;
+    DataTX_EE[2]=readHour;
+    DataTX_EE[4]=readDate;
+    DataTX_EE[5]=readMon;
+}
+
+/*Prints the speed of the motor to the LCD and
+ *@Param: void
+ *@Return:void
+ */
+void printFunction(void){
+
+   int index=0;   //Counter variable for excursion storage.
+
+   if(display==1){
+
+       rpm = (((1000*1000*60)/(2*pmw*250))+rpm)/2;  //calc rpm 250us by the number of counts
+       speed = ((((rpm*60)*37.699)/5280)+speed)/2;  //calc speed
+
+       //Saves to EEPROM if speed is above 85MPH.
+       //Saves the first excursion to location one.
+       if(speed >99){
+           speed = 99;
+       }
+
+       RTC_Read(RTC_ADD,0,18,DataRX_RTC);
+
+       if((ALARM > speed) && index==0){
+
+           RTC_Read(RTC_ADD,0,18,DataRX_RTC);  //Reads from the Real Time Clock
+
+           delay_Micro(200);
+           BCDtoHex(DataRX_RTC);   //Converts from the BDC to Hex prior to the saving to EEPROM
+           delay_Micro(200);
+           eeprom_Write(EEPROM_ADD,0,6,DataTX_EE);  //Saves to EEPROM.
+           delay_Micro(200);
+           index++;
+
+       }else if((ALARM > speed) && index==1){
+
+           RTC_Read(RTC_ADD,0,18,DataRX_RTC);   //Reads from the Real Time Clock
+
+           delay_Micro(200);
+           BCDtoHex(DataRX_RTC);   //Converts from the BDC to Hex prior to the saving to EEPROM
+           delay_Micro(200);
+           eeprom_Write(EEPROM_ADD,6,6,DataTX_EE);  //Saves to EEPROM.
+           delay_Micro(200);
+           index++;
+
+       }else if((ALARM > speed) && index==2){
+
+           RTC_Read(RTC_ADD,0,18,DataRX_RTC);   //Reads from the Real Time Clock
+
+           delay_Micro(200);
+           BCDtoHex(DataRX_RTC);   //Converts from the BDC to Hex prior to the saving to EEPROM
+           delay_Micro(200);
+           eeprom_Write(EEPROM_ADD,12,6,DataTX_EE);  //Saves to EEPROM.
+           delay_Micro(200);
+           index++;
+
+       }else if((ALARM > speed) && index==3){
+
+           RTC_Read(RTC_ADD,0,18,DataRX_RTC);   //Reads from the Real Time Clock
+
+           delay_Micro(200);
+           BCDtoHex(DataRX_RTC);   //Converts from the BDC to Hex prior to the saving to EEPROM
+           delay_Micro(200);
+           eeprom_Write(EEPROM_ADD,18,6,DataTX_EE);  //Saves to EEPROM.
+           delay_Micro(200);
+           index++;
+
+       }else if((ALARM > speed) && index==4){
+
+           RTC_Read(RTC_ADD,0,18,DataRX_RTC);   //Reads from the Real Time Clock
+
+           delay_Micro(200);
+           BCDtoHex(DataRX_RTC);   //Converts from the BDC to Hex prior to the saving to EEPROM
+           delay_Micro(200);
+           eeprom_Write(EEPROM_ADD,24,6,DataTX_EE);  //Saves to EEPROM.
+           delay_Micro(200);
+           index=5;
+       }
+
+       toString(speed, speedD);     //Converts integers to characters to print to the LCD.
+       step(speed,0);
+
+       //Speed per Mile displayed to the LCD
+       ST7735_DrawStringMod(40,60,speedD, ST7735_WHITE, ST7735_BLACK,3);
+       ST7735_DrawStringMod(40,90,"Miles/HR", ST7735_WHITE, ST7735_BLACK,1);
+
+       display=0;   //Reset flag at the end of the run.
+   }else{
+       speed=0;
+       toString(speed,speedD);
+
+       //Speed per Mile displayed to the LCD
+       ST7735_DrawStringMod(40,60,speedD, ST7735_WHITE, ST7735_BLACK,3);
+       ST7735_DrawStringMod(40,90,"Miles/HR", ST7735_WHITE, ST7735_BLACK,1);
+   }
+}
+
+/*Prints the times of speed excursions to the LCD
+ *@Param: void
+ *@Return:void
+ */
+void printExecursion(void){
+    int shift=4;   //Shfit factor.
+
+    uint8_t sec;   //Seconds from the EEPROM.
+    uint8_t mins;  //Mins from the EEPROM.
+    uint8_t hour;  //Hours from the EEPROM.
+    uint8_t secOne;
+    uint8_t minsOne;
+    uint8_t hourOne;
+    uint8_t secTwo;
+    uint8_t minsTwo;
+    uint8_t hourTwo;
+    uint8_t secThree;
+    uint8_t minsThree;
+    uint8_t hourThree;
+    uint8_t secFour;
+    uint8_t minsFour;
+    uint8_t hourFour;
+
+    char secD[1];
+    char minsD[1];
+    char hourD[1];
+    char secDone[1];
+    char minsDone[1];
+    char hourDone[1];
+    char secDtwo[1];
+    char minsDtwo[1];
+    char hourDtwo[1];
+    char secDthree[1];
+    char minsDthree[1];
+    char hourDthree[1];
+    char secDfour[1];
+    char minsDfour[1];
+    char hourDfour[1];
+
+    delay_Micro(200);
+    eeprom_Read(EEPROM_ADD,0,30,DataRX_EE); //Reads from EEPROM.
+
+    //Prints the Excursions to the LCD.
+    //Converts uint8_t from BCD to Hex and to char for LCD display.
+    hour=(DataRX_EE[2]>>shift)*10+(DataRX_EE[2]&0x0F);    //Hours.
+    sec=(DataRX_EE[0]>>shift)*10+(DataRX_EE[0]& 0x0F);    //Seconds from the RTC
+    mins=(DataRX_EE[1]>>shift)*10+(DataRX_EE[1]&0x0F);    //Minutes.
+
+    hourOne=(DataRX_EE[8]>>shift)*10+(DataRX_EE[8]&0x0F);
+    secOne=(DataRX_EE[6]>>shift)*10+(DataRX_EE[6]& 0x0F);
+    minsOne=(DataRX_EE[7]>>shift)*10+(DataRX_EE[7]&0x0F);
+
+    hourTwo=(DataRX_EE[14]>>shift)*10+(DataRX_EE[14]&0x0F);
+    secTwo=(DataRX_EE[12]>>shift)*10+(DataRX_EE[12]& 0x0F);
+    minsTwo=(DataRX_EE[13]>>shift)*10+(DataRX_EE[13]&0x0F);
+
+    hourThree=(DataRX_EE[20]>>shift)*10+(DataRX_EE[20]&0x0F);
+    secThree=(DataRX_EE[18]>>shift)*10+(DataRX_EE[18]& 0x0F);
+    minsThree=(DataRX_EE[19]>>shift)*10+(DataRX_EE[19]&0x0F);
+
+    hourFour=(DataRX_EE[26]>>shift)*10+(DataRX_EE[26]&0x0F);
+    secFour=(DataRX_EE[24]>>shift)*10+(DataRX_EE[24]& 0x0F);
+    minsFour=(DataRX_EE[25]>>shift)*10+(DataRX_EE[25]&0x0F);
+
+    toString(hour,hourD);       //Time number 1
+    toString(mins,minsD);
+    toString(sec,secD);
+
+    toString(hourOne,hourDone);  //Time number 2
+    toString(minsOne,minsDone);
+    toString(secOne,secDone);
+
+    toString(hourTwo,hourDtwo);  //Time number 3
+    toString(minsTwo,minsDtwo);
+    toString(secTwo,secDtwo);
+
+    toString(hourThree,hourDthree);//Time number 4
+    toString(minsThree,minsDthree);
+    toString(secThree,secDthree);
+
+    toString(hourFour,hourDfour);//Time number 5
+    toString(minsFour,minsDfour);
+    toString(secFour,secDfour);
+
+    ST7735_SetCursor(0,0);      //Prints the date at the index 5,0
+    ST7735_OutString(hourD);
+    ST7735_SetCursor(1,0);
+    ST7735_OutString(":");
+    ST7735_SetCursor(2,0);
+    ST7735_OutString(minsD);
+    ST7735_SetCursor(4,0);
+    ST7735_OutString(":");
+    ST7735_SetCursor(5,0);
+    ST7735_OutString(secD);
+
+    //Memory location number 2
+    ST7735_SetCursor(0,2);
+    ST7735_OutString(hourDone);
+    ST7735_SetCursor(1,2);
+    ST7735_OutString(":");
+    ST7735_SetCursor(2,2);
+    ST7735_OutString(minsDone);
+    ST7735_SetCursor(4,2);
+    ST7735_OutString(":");
+    ST7735_SetCursor(5,2);
+    ST7735_OutString(secDone);
+
+    //Memory location number 3
+    ST7735_SetCursor(0,4);
+    ST7735_OutString(hourDtwo);
+    ST7735_SetCursor(1,4);
+    ST7735_OutString(":");
+    ST7735_SetCursor(2,4);
+    ST7735_OutString(minsDtwo);
+    ST7735_SetCursor(4,4);
+    ST7735_OutString(":");
+    ST7735_SetCursor(5,4);
+    ST7735_OutString(secDtwo);
+
+    //Memory location number 4
+    ST7735_SetCursor(0,6);
+    ST7735_OutString(hourDthree);
+    ST7735_SetCursor(1,6);
+    ST7735_OutString(":");
+    ST7735_SetCursor(2,6);
+    ST7735_OutString(minsDthree);
+    ST7735_SetCursor(4,6);
+    ST7735_OutString(":");
+    ST7735_SetCursor(5,6);
+    ST7735_OutString(secDthree);
+
+    //Memory location number 5
+    ST7735_SetCursor(0,8);
+    ST7735_OutString(hourDfour);
+    ST7735_SetCursor(1,8);
+    ST7735_OutString(":");
+    ST7735_SetCursor(2,8);
+    ST7735_OutString(minsDfour);
+    ST7735_SetCursor(4,8);
+    ST7735_OutString(":");
+    ST7735_SetCursor(5,8);
+    ST7735_OutString(secDfour);
+
+}
+/*Converts data from the RTC from BCD to char
+ *before printing to the LCD for display
+ *@Param: void
+ *@Return:void
+ */
+void RTC_TimetoChar(void){
+  int shift=4;
+
+  uint8_t month;     //Month from the RTC module.
+  uint8_t date;      //Date from the RTC module.
+  uint8_t sec;       //Seconds from the RTC module.
+  uint8_t mins;      //Mins from the RTC module.
+  uint8_t hour;      //Hours from the RTC module.
+
+  RTC_Read(RTC_ADD,0,18,DataRX_RTC); //Reads from the RTC
+
+  //Converts uint8_t from BCD to Hex and to char for LCD display.
+  date=(DataRX_RTC[4]>>shift)*10+ (DataRX_RTC[4]& 0x0F);  //BCD to decimal conversion - Date
+  month=(DataRX_RTC[5]>>shift)*10+ (DataRX_RTC[5]& 0x0F); //BCD to decimal conversion - Hours
+  hour=(DataRX_RTC[2]>>shift)*10+(DataRX_RTC[2]&0x0F);    //Hours.
+  sec=(DataRX_RTC[0]>>shift)*10+(DataRX_RTC[0]& 0x0F);    //Seconds from the RTC
+  mins=(DataRX_RTC[1]>>shift)*10+(DataRX_RTC[1]&0x0F);    //Minutes.
+
+  //Integer to character conversion.
+  toString(date,readDateD);
+  //toString(month,readMonD);
+  toString(hour,readHourD);
+  toString(mins,readMinsD);
+  toString(sec,readSecD);
+
+  //Displays to the LCD screen.
+  ST7735_SetCursor(0,0);       //Distance of object from sensor
+  ST7735_OutString(monthOfyear(month));
+  ST7735_SetCursor(4,0);       //Prints the date at the index 5,0
+  ST7735_OutString(readDateD);
+  ST7735_SetCursor(0,1);       //Prints the date at the index 5,0
+  ST7735_OutString(readHourD);
+  ST7735_SetCursor(1,1);
+  ST7735_OutString("/");
+  ST7735_SetCursor(2,1);
+  ST7735_OutString(readMinsD);
+  ST7735_SetCursor(4,1);
+  ST7735_OutString("/");
+  ST7735_SetCursor(5,1);
+  ST7735_OutString(readSecD);
+}
+
+/*Function reverses the printing sequence of a given RPM.
+ *@Param: char
+ *@Return: void
+ */
+void backwards(char s[]){
+
+    int i, j;
+    char c;
+ for (i = 0, j = strlen(s)-1; i<j; i++, j--) {
+        c = s[i];
+        s[i] = s[j];
+        s[j] = c;
+    }
+}
+
+/*Parses integer values to strings
+ *@param: int, char array.
+ *@Return:void
+ */
+void toString(int n, char s[]){
+
+    int i, sign;
+    if ((sign = n) < 0)  //record sign.
+        n = -n;          // make n positive.
+        i = 0;
+    do{       /* generate digits in reverse order */
+        s[i++] = n % 10 + '0';   /* get next digit */
+      } while ((n /= 10) > 0);     /* delete it */
+   if (sign < 0)
+        s[i++] = '-';
+        s[i] = '\0';
+
+   backwards(s);
+}
+
+/* Selects the Month of the year
+ *@Return: char*
+ *@Param: unsigned char
+ */
+ char* monthOfyear(int month){
+     if(month==1){
+         return "Jan";
+     }else if(month==2){
+         return "Feb";
+     }else if(month==3){
+         return "Mar";
+     }else if(month==4){
+         return "Apr";
+     }else if(month==5){
+         return "May";
+     }else if(month==6){
+         return "Jne";
+     }else if(month==7){
+         return "Jly";
+     }else if(month==8){
+         return "Aug";
+     }else if(month==9){
+         return "Sepr";
+     }else if(month==10){
+         return "Oct";
+     }else if(month==11){
+         return "Nov";
+     }else if(month==12){
+         return "Dec";
+     }else{
+         return "Error!";
+     }
+ }
+
+/*Polls data data from Timer A instance
+ *calculates the distance in the peripheral
+ *of the sensor to calculate the distance and
+ *prints to the LCD
+ *@Param: void
+ *@Return: void
+ */
+void ultraSonicFunction(void){
+
+    //Pulses the Ultraonic sensor before data collection.
+    SENPORT->OUT &= ~TRIG;     //Sends the trigger pulse to UltraSonic Sensor.
+    delay_Micro(10);
+    SENPORT->OUT |= TRIG;
+
+    delay_Milli(20000);        //Waits for signal to settle.
+
+    Inches = ((pwm/3.0)/148.0);  //Distance calculation in Inches
+    toString(Inches,InchesD);  //Prints the speed to the LCD.
+
+    ST7735_SetCursor(15,0);       //Distance of object from sensor
+    ST7735_OutString(InchesD);
+    ST7735_SetCursor(17,0);       //Distance of object from sensor
+    ST7735_OutString(":In");
+
+    //Pulse Widith Modulation for the Red LED
+    //RED pulses when object is within 15 inches of vehicle.
+    if(Inches <= 1.00){
+        TIMER_A2->CCR[1] = 1000-1;
+        delay_Milli(2500);
+        TIMER_A2->CCR[1] = 0;
+        delay_Milli(2500);
+        }
+    if(Inches >15.00){
+        TIMER_A2->CCR[1]=0;
+    }else if(Inches > 0.0 && Inches <= 15.00){
+        TIMER_A2->CCR[1] = 1000-(Inches*100-1);
+    }else{
+        TIMER_A2->CCR[1]=0;
+    }
+}
+
+/*Motor movement traverse statemachine - utilizes the
+ *full step motor movement.
+ *@Param: void
+ *@Return:void
+ */
+void motorFunction(void){
+
+    int i = 0;
+    int step_num = 10000;
+    int state = STEP1;
+
+    for(i = 0; i < step_num; i++){
+        switch (state){
+            case STEP1:
+
+                 MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                 MPORT->OUT |= (IN1 | IN2);
+                 state=STEP2;
+                 break;
+
+            case STEP2:
+                 MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                 MPORT->OUT |= (IN2 | IN3);
+                 state=STEP3;
+                 break;
+
+            case STEP3:
+                 MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                 MPORT->OUT |= (IN3 | IN4);
+                 state=STEP4;
+                 break;
+
+            case STEP4:
+                 MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                 MPORT->OUT |= (IN1 | IN4);
+                 state=STEP1;
+                 break;
+
+             default:
+                 MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+                 state = STEP1;
+          }
+          printFunction();
+
+          if(timeFlag){   //Atempt to stop motor.
+              step_num=0;
+              if(step_num==0){
+                  Output_Clear();
+                  current=stopTwo;
+                  timeFlag=0;
+                  }
+          delay_Milli(1000);
+          }
+     }
+}
+
+/*Use of burst read to read from the 24C02C from consecutive locations
+ *read: S-(SlaveADD+W) - ACK-memADD-(slaveAdd)-ACK-data-ACK...-data-NACK-P
+ *@Param:int,unsigned char,int, unsigned char*
+ *@Return: int
+ */
+int eeprom_Read(int slaveAdd, unsigned char memAdd, int byteCount,unsigned char* data){
+
+    if (byteCount <= 0)
+        return -1;      //no read was performed
+
+    EUSCI_B1->I2CSA = slaveAdd;            //setup slave addr
+    EUSCI_B1->CTLW0 |= 0x0010;             //enable transmitter
+    EUSCI_B1->CTLW0 |= 0x0002;             //generate START and send slave addr
+
+    while (EUSCI_B1->CTLW0 & 2);            //wait until ready to transmit
+    EUSCI_B1->TXBUF = (memAdd & 0x7F00)>>8; //Send memory address to slave MSB.
+
+    while (!(EUSCI_B1->IFG & 2));           //wait until last transmit is complete
+    EUSCI_B2->TXBUF  = memAdd & 0x00FF;    //Send memory address to slave LSB.
+
+    while(!(EUSCI_B1->IFG & 2));
+
+    EUSCI_B1->CTLW0 &= ~0x0010;             //enable receiver
+    EUSCI_B1->CTLW0 |= 0x0002;              //generate RESTART and send slave address
+    while (!(EUSCI_B1->IFG & 2));           //wait until RESTART is finished
+
+    do {                                    //receive data one byte at a time
+        if(byteCount == 1){                 //only when 1 byte data is left
+            EUSCI_B1->CTLW0 |= 0x0004;      //setup to send stop after last byte is received
+        }
+        while(!(EUSCI_B1->IFG & 1));        //wait until data is received
+        *data++ = EUSCI_B1->RXBUF;           //read received data
+        byteCount--;
+    } while(byteCount);
+
+    while(EUSCI_B1->CTLW0 & 4);             //wait until stop bit is sent
+    return 0;                                //no error.
+
+}
+
+/*Use of burst write to write data to consecutive
+ *memory locations.
+ *@Return: int
+ *@Param: int,unsigned char,int, unsigned char*
+ */
+int eeprom_Write(int slaveAdd,unsigned char memAdd,int byteCount,unsigned char* data){
+
+    if(byteCount <= 0){return -1;}  //No write was performed
+
+
+    EUSCI_B1->I2CSA = slaveAdd;    //Setup Slave Addr
+    EUSCI_B1->CTLW0 |= 0x0010;      //enable transmitter
+    EUSCI_B1->CTLW0 |= 0x0002;      //generate START and send slave addr
+    while(!(EUSCI_B1->IFG & 2));    //wait until ready to transmit
+    EUSCI_B1->TXBUF = memAdd;// & 0xFF00)>> 8;      //send memory address to slave most significant bit.
+
+    while(!(EUSCI_B1->IFG & 2));          //Wait till it's ready for next transmission.
+    EUSCI_B1->TXBUF  = memAdd; //& 0x00FF;   //Send memory address to slave LSB.
+
+    while(!(EUSCI_B1->IFG & 2));        //Wait till it's ready for next transmission.
+
+    do {                                //send data one byte at a time
+        while(!(EUSCI_B1->IFG & 2));    //wait until ready to transmit
+        EUSCI_B1->TXBUF = *data++;      //send data to slave
+        byteCount--;
+    } while(byteCount > 0);
+
+    while(!(EUSCI_B1->IFG & 2));    //wait until last transmit is done
+    EUSCI_B1->CTLW0 |= 0x0004;      //send STOP
+    while(EUSCI_B1->CTLW0 & 4);     //wait until stop is sent
+    return 0;                       //no error
+}
+
+/*Use of burst read to read from the 24C02C from consecutive locations
+ *read: S-(SlaveADD+W) - ACK-memADD-(slaveAdd)-ACK-data-ACK...-data-NACK-P
+ *@Param:int,unsigned char,int, unsigned char*
+ *@Return: int
+ */
+int RTC_Read(int slaveAdd, unsigned char memAdd, int byteCount,unsigned char* data){
+
+    if(byteCount <= 0)
+        return -1;
+
+    EUSCI_B1->I2CSA  = slaveAdd;      //Setup slave address.
+    EUSCI_B1->CTLW0 |= 0x0010;        //Enable transmitter.
+    EUSCI_B1->CTLW0 |= 0x0002;        //Generate START and send slave address.
+
+    while(EUSCI_B1->CTLW0 & 2){}      //Wait till transmission is complete.
+    EUSCI_B1->TXBUF  = memAdd;        //Send memory address to DS1337.
+    while(!(EUSCI_B1->IFG & 2)){}       //Wait till last transmit is complete.
+    EUSCI_B1->CTLW0 &= ~0x0010;       //Enable receiver.
+    EUSCI_B1->CTLW0 |= 0x0002;        //generate RESTART and send slave address.
+    while(!(EUSCI_B1->IFG & 2)){}       //Wait till RESTART is complete.
+
+    do{
+        if(byteCount==1)                 //When only one byte of data is left.
+            EUSCI_B1->CTLW0 |= 0x0004;   //Setup to send STOP after the last bit is received.
+        while(!(EUSCI_B1->IFG & 1)){}     //Wait till data is received.
+        *data++ = EUSCI_B1->RXBUF;       //Read the received data.
+        byteCount--;
+    }while(byteCount);
+
+    while(EUSCI_B1->CTLW0 & 4){}         //Wait till STOP is sent.
+    return 0;                         //no error.
+}
+
+/*Use of burst write to write data to consecutive
+ *memory locations.
+ *@Return: int
+ *@Param: int,unsigned char,int, unsigned char*
+ */
+int RTC_Write(int slaveAdd,unsigned char memAdd,int byteCount,unsigned char* data){
+    if(byteCount <= 0)
+        return -1;
+
+        EUSCI_B1->I2CSA  = slaveAdd;      //Setup slave address.
+        EUSCI_B1->CTLW0 |= 0x0010;        //Enable transmitter.
+        EUSCI_B1->CTLW0 |= 0x0002;        //Generate START and send slave address.
+        while(!(EUSCI_B1->IFG & 2)){}      //Delay till the ready for transmission.
+        EUSCI_B1->TXBUF = memAdd;         //Tx memory address to slave device - DS1337.
+
+        do{
+            while(!(EUSCI_B1->IFG & 2)){} //Time delay untill ready to transmit.
+            EUSCI_B1->TXBUF = *data++;    //Sends data to DS1337.
+            byteCount--;
+        }while(byteCount >0);
+
+        while(!( EUSCI_B1->IFG & 2)){}      //Delay till last transmission is successful
+        EUSCI_B1->CTLW0 |= 0x0004;         //Sends the stop bit.
+        while(EUSCI_B1->CTLW0 & 4){}        //Delay till STOP bit sent.
+
+        return 0;
+}
+
+/*State Machine Canvassing for Program Run, Has states - park,reverse,stop and drive.
+ *@Param:Void
+ *@Return:Void
+ */
+void stateCanvas(void){
+
+    char tempD[1]={0};
+
+    uint8_t tempTens=(DataRX_RTC[17]>>4)*10+(DataRX_RTC[17]& 0x0F);  //Temperature conversion from BCD to Decimal.
+    uint8_t tempOnes=(DataRX_RTC[18]>>4)*10+(DataRX_RTC[18]& 0x0F);
+    uint8_t sumtemp = tempTens+tempOnes;
+    uint8_t temp = ((9/5)*sumtemp)+55;
+
+    toString(temp,tempD);
+
+    switch(current){
+
+            case park:  //Park State.
+                ST7735_DrawChar(50,60,'P',ST7735_WHITE,ST7735_BLACK,4); //Park
+                ST7735_DrawStringMod(30,135,tempD, ST7735_GREEN, ST7735_BLACK,2);   //Prints the the temp to the LCD.
+                ST7735_DrawStringMod(0,140,"TEMP:", ST7735_WHITE, ST7735_BLACK,1);
+                ST7735_DrawStringMod(55,135,"F", ST7735_GREEN, ST7735_BLACK,2);
+
+                TIMER_A2->CCR[1] = 0;   //Turns the LED to off.
+                ambientLight();         //Ambient Light function.
+                RTC_TimetoChar();
+                ST7735_SetCursor(15,0); //Distance of object from sensor
+                ST7735_OutString("--");
+                ST7735_SetCursor(17,0); //Distance of object from sensor
+                ST7735_OutString(":In");
+
+                //Door Open status displayed to the LCD.
+                if(doorOpen){
+                  Output_Clear();
+                  ST7735_DrawStringMod(30,60,"Door Ajar!:", ST7735_RED, ST7735_BLACK,1);
+                  doorOpen=0; //Resets the door flag
+                }
+
+                //Changes the state when white button is pressed.
+               if(timeFlag){
+                    _delay_cycles(200);
+                    timeFlag=0;              //Rests flag.
+                    TIMEBUTT->IE |= TIMEPIN; //Interrupt edge select enabled
+                    current=reverse;         //State changes to drive.
+                    Output_Clear();
+                   }
+                break;
+           case reverse:                    //Vehicle is in Reverse.
+               ST7735_DrawChar(50,60,'R',ST7735_WHITE,ST7735_BLACK,4); //Reverse
+               ST7735_DrawStringMod(30,135,tempD, ST7735_GREEN, ST7735_BLACK,2);   //Prints the the temp to the LCD.
+               ST7735_DrawStringMod(0,140,"TEMP:", ST7735_WHITE, ST7735_BLACK,1);
+               ST7735_DrawStringMod(55,135,"F", ST7735_GREEN, ST7735_BLACK,2);
+               ambientLight();              //Ambient Light changes
+               RTC_TimetoChar();
+               ultraSonicFunction();        //Proximity sensor function triggered only in reverse
+
+               if(timeFlag){
+                   current=stop;            //State changes to drive.
+                   timeFlag=0;              //Rests flag.
+                   TIMEBUTT->IE |= TIMEPIN; //Interrupt edge select enabled
+                   Output_Clear();
+               }
+               break;
+
+           case stop:   //Vehicle Stopped
+               TIMER_A2->CCR[1] = 0;   //Turns the LED to off.
+               ST7735_DrawChar(50,60,'S',ST7735_WHITE,ST7735_BLACK,4);
+               ST7735_DrawStringMod(30,135,tempD, ST7735_GREEN, ST7735_BLACK,2);   //Prints the the temp to the LCD.
+               ST7735_DrawStringMod(0,140,"TEMP:", ST7735_WHITE, ST7735_BLACK,1);
+               ST7735_DrawStringMod(55,135,"F", ST7735_GREEN, ST7735_BLACK,2);
+               ambientLight();
+               RTC_TimetoChar();
+
+               if(timeFlag){
+                   current=drive;
+                   timeFlag=0;
+                   TIMEBUTT->IE |= TIMEPIN; //Interrupt edge select enabled
+                   Output_Clear();
+               }
+               break;
+           case drive:               //Vehicle Moving forward.
+               TIMER_A2->CCR[1] = 0; //Turns the LED to off.
+               ambientLight();
+               RTC_TimetoChar();
+               motorFunction();      //Motor movement.
+               break;
+           case stopTwo:    //Prints the excursion.
+               TIMER_A2->CCR[1] = 0; //Turns the LED to off.
+               ST7735_DrawStringMod(30,135,tempD, ST7735_GREEN, ST7735_BLACK,2);   //Prints the the temp to the LCD.
+               ST7735_DrawStringMod(0,140,"TEMP:", ST7735_WHITE, ST7735_BLACK,1);
+               ST7735_DrawStringMod(55,135,"F", ST7735_GREEN, ST7735_BLACK,2);
+               ambientLight();
+               printExecursion();
+
+               if(timeFlag){
+                  current=park;
+                  timeFlag=0;
+                  TIMEBUTT->IE |= TIMEPIN; //Interrupt edge select enabled
+                  Output_Clear();
+                 }
+               break;
+           default:
+               current=park;
+               TIMER_A2->CCR[1] = 0;
+               MPORT->OUT &= ~(IN1 | IN2 | IN3 | IN4);
+    }
+}
+
+/*Changes the backlight intensity of the LCD based on
+ *Pulse Width Modulation on Timer_A
+ *@param: void
+ *@Return:void
+ */
+void ambientLight(void){
+
+    float nADC,brightness;  //Local Variables.
+    static volatile uint16_t sample;
+
+    ADC14->CTL0 |= 1;               //Start Conversion.
+    while((!ADC14->IFGR0 & BIT0));  //Wait for conversion to complete.
+    sample = ADC14->MEM[0];         //Gets the data from the ADC
+    nADC = (sample *3.3)/16384;
+    delay_Milli(500);
+    brightness=(nADC/3.3) * 48000000;
+
+    TIMER_A0->CCR[4] = brightness;
+}
+
+/*Main Function - Function Execution
+ *@Param: void
+ *@Return:void
+ */
+void main(void){
+    WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD;     // stop watchdog timer
+
+    uint8_t C1=1;
+    uint8_t C2=2;
+    uint8_t C3=0;
+    uint8_t C4=0;
+
+    /*Method Invocation*/
+    init();
+    timerA_init();
+    PMW_LCD_LED();      //LED Pin PMW-Setup
+    I2C_Init();         //I2C_Instantiation
+    SPI_Init();
+    Clock_Init48MHz();  //48MHz Instantiation
+
+    /**LCD Initialization*/
+    ST7735_InitR(INITR_GREENTAB);
+    Output_On();
+    ST7735_DrawBitmap(4,160,Kilmonger,120,160); //Prints the splash screen.
+    __delay_cycles(60000000);                   //3 second wait for splash screen
+    ST7735_FillScreen(ST7735_BLACK);
+
+    display_Init(DIGIT_0, C1);      //Transmission of data Cx and Address DIGIT_X
+    display_Init(DIGIT_1, C2);
+    display_Init(DIGIT_2, C3);
+    display_Init(DIGIT_3, C4);
+    display_Init(DIGIT_4, C1);
+    display_Init(DIGIT_5, C2);
+    display_Init(DIGIT_6, C3);
+    display_Init(DIGIT_7, C4);
+
+    //Sets the date and time to the RTC Clock.
+    RTC_Write(RTC_ADD,0,18,RTC_Set);
+
+    while(1){
+        stateCanvas();
+     }
+}
